@@ -1,0 +1,23 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "ipTIME Router Setup",
+        "description": "Enter your router admin credentials.",
+        "data": {
+          "host": "Router IP Address",
+          "username": "Admin Username",
+          "password": "Admin Password"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Cannot connect to the router. Please check the IP address.",
+      "invalid_auth": "Invalid username or password.",
+      "unknown": "An unexpected error occurred."
+    },
+    "abort": {
+      "already_configured": "This router is already configured."
+    }
+  }
+}

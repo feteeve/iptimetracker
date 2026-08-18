@@ -1,0 +1,8 @@
+{
+  "name": "ipTIME Tracker",
+  "domain": "iptimetracker",
+  "documentation": "https://github.com/feteeve0/iptimetracker",
+  "iot_class": "local_polling",
+  "homeassistant": "2024.1.0",
+  "render_readme": true
+}
