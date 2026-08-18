@@ -78,12 +78,12 @@ class IptimeDhcpCountSensor(_IptimeBaseSensor):
         return {
             "leases": [
                 {
-                    "mac": l.mac,
-                    "ip": l.ip,
-                    "hostname": l.hostname,
-                    "expires": l.expires,
+                    "mac": lease.mac,
+                    "ip": lease.ip,
+                    "hostname": lease.hostname,
+                    "expires": lease.expires,
                 }
-                for l in self.coordinator.data.dhcp_leases
+                for lease in self.coordinator.data.dhcp_leases
             ]
         }
 

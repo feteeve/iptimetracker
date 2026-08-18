@@ -10,7 +10,7 @@ import aiohttp
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .const import CONF_HOST, CONF_PASSWORD, CONF_USERNAME, DOMAIN, SCAN_INTERVAL
+from .const import DOMAIN, SCAN_INTERVAL
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -56,6 +56,7 @@ class IptimeClient:
         self._username = username
         self._password = password
         self._session: aiohttp.ClientSession | None = None
+        self._logged_in = False
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -82,23 +83,34 @@ class IptimeClient:
                 allow_redirects=True,
             ) as resp:
                 text = await resp.text()
-                # 로그인 실패 시 보통 login 페이지로 리다이렉트되거나 에러 메시지 포함
-                if "wrong" in text.lower() or "invalid" in text.lower():
-                    return False
-                return resp.status == 200
+                # 로그인 폼 입력 필드가 응답에 남아있으면 실패
+                login_failed = (
+                    'name="passwd"' in text
+                    or 'name="username"' in text
+                    or "efm_pwchk" in text
+                )
+                self._logged_in = not login_failed
+                return self._logged_in
         except aiohttp.ClientError as err:
+            self._logged_in = False
             raise UpdateFailed(f"공유기 연결 실패: {err}") from err
 
     async def _fetch(self, smenu: str) -> str:
+        """ipTIME은 데이터 조회도 POST 방식 사용."""
         session = await self._get_session()
-        params = {"tmenu": "iframe", "smenu": smenu}
+        data = {"tmenu": "iframe", "smenu": smenu}
         try:
-            async with session.get(
+            async with session.post(
                 f"{self._base_url}{self.LOGIN_PATH}",
-                params=params,
+                data=data,
                 timeout=aiohttp.ClientTimeout(total=10),
             ) as resp:
-                return await resp.text()
+                text = await resp.text()
+                # 세션 만료로 로그인 페이지가 반환된 경우
+                if 'name="passwd"' in text or "efm_pwchk" in text:
+                    self._logged_in = False
+                    raise UpdateFailed(f"세션 만료 ({smenu}), 재로그인 필요")
+                return text
         except aiohttp.ClientError as err:
             raise UpdateFailed(f"데이터 조회 실패 ({smenu}): {err}") from err
 
@@ -253,13 +265,27 @@ class IptimeClient:
         return leases
 
     async def fetch_all(self) -> IptimeData:
-        logged_in = await self.login()
-        if not logged_in:
-            raise UpdateFailed("로그인 실패: ID 또는 비밀번호를 확인하세요.")
+        # 세션이 없거나 만료된 경우에만 재로그인
+        if not self._logged_in:
+            logged_in = await self.login()
+            if not logged_in:
+                raise UpdateFailed("로그인 실패: ID 또는 비밀번호를 확인하세요.")
 
-        wireless = await self.get_wireless_clients()
-        dhcp = await self.get_dhcp_leases()
-        static = await self.get_static_leases()
+        try:
+            wireless = await self.get_wireless_clients()
+            dhcp = await self.get_dhcp_leases()
+            static = await self.get_static_leases()
+        except UpdateFailed as err:
+            if "세션 만료" in str(err):
+                # 재로그인 후 1회 재시도
+                logged_in = await self.login()
+                if not logged_in:
+                    raise UpdateFailed("재로그인 실패") from err
+                wireless = await self.get_wireless_clients()
+                dhcp = await self.get_dhcp_leases()
+                static = await self.get_static_leases()
+            else:
+                raise
 
         return IptimeData(
             wireless_clients=wireless,
