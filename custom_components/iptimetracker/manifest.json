@@ -1,12 +1,16 @@
 {
   "domain": "iptimetracker",
   "name": "ipTIME Tracker",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "documentation": "https://github.com/feteeve/iptimetracker",
   "issue_tracker": "https://github.com/feteeve/iptimetracker/issues",
   "codeowners": ["@feteeve"],
   "requirements": ["aiohttp>=3.9.0"],
   "dependencies": [],
   "config_flow": true,
-  "iot_class": "local_polling"
+  "iot_class": "local_polling",
+  "ssdp": [
+    { "manufacturer": "EFM Networks" },
+    { "deviceType": "urn:schemas-upnp-org:device:InternetGatewayDevice:1" }
+  ]
 }

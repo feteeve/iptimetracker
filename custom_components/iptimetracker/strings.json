@@ -3,11 +3,17 @@
     "step": {
       "user": {
         "title": "ipTIME 공유기 설정",
-        "description": "공유기 관리자 정보를 입력하세요. 주소에는 필요한 경우 포트도 포함할 수 있습니다.",
+        "description": "공유기 관리자 정보를 입력하세요. 주소에는 필요한 경우 포트도 포함할 수 있습니다.{error_detail}",
         "data": {
           "host": "공유기 주소",
           "username": "관리자 아이디",
-          "password": "관리자 비밀번호"
+          "password": "관리자 비밀번호",
+          "consider_home": "외출 판단 지연 시간(초)",
+          "rssi_limit": "메쉬 기기 RSSI 기준치(dBm)"
+        },
+        "data_description": {
+          "consider_home": "기기가 접속자 목록에서 사라진 뒤에도 이 시간(초) 동안은 '재실'로 유지합니다. 절전모드로 인한 깜빡임 방지용입니다.",
+          "rssi_limit": "EasyMesh 위성 기기에만 적용됩니다. 신호가 이 값보다 약하면 재실로 보지 않습니다."
         }
       }
     },
@@ -18,7 +24,23 @@
       "unknown": "예상하지 못한 오류가 발생했습니다. Home Assistant 로그를 확인하세요."
     },
     "abort": {
-      "already_configured": "이미 등록된 공유기입니다."
+      "already_configured": "이미 등록된 공유기입니다.",
+      "cannot_connect": "공유기를 자동으로 찾지 못했습니다."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "ipTIME Tracker 옵션",
+        "data": {
+          "consider_home": "외출 판단 지연 시간(초)",
+          "rssi_limit": "메쉬 기기 RSSI 기준치(dBm)"
+        },
+        "data_description": {
+          "consider_home": "기기가 접속자 목록에서 사라진 뒤에도 이 시간(초) 동안은 '재실'로 유지합니다.",
+          "rssi_limit": "EasyMesh 위성 기기에만 적용됩니다. 신호가 이 값보다 약하면 재실로 보지 않습니다."
+        }
+      }
     }
   }
 }

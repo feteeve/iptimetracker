@@ -11,10 +11,11 @@ from urllib.parse import urlsplit
 
 import aiohttp
 
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .const import DOMAIN, SCAN_INTERVAL
+from .const import CONF_RSSI_LIMIT, DEFAULT_RSSI_LIMIT, DOMAIN, SCAN_INTERVAL
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -60,12 +61,22 @@ class IptimeData:
 
 
 class IptimeClient:
-    """HTTP client for both the current and classic ipTIME admin UIs."""
+    """HTTP client for the current, classic and mobile (IUX) ipTIME admin UIs."""
 
-    LEGACY_LOGIN_PATH = "/sess-bin/login_handler.cgi"
+    # Two known classic login handlers; some firmware only serves one of them.
+    LEGACY_LOGIN_PATHS = ("/sess-bin/login_handler.cgi", "/login/login.cgi")
     LEGACY_DATA_PATH = "/sess-bin/timepro.cgi"
     BETA_UI_PATH = "/ui/"
     BETA_SERVICE_PATH = "/cgi/service.cgi"
+    HOSTINFO_PATH = "/login/hostinfo2.cgi"
+    MOBILE_LOGIN_PATH = "/m_handler.cgi"
+    MOBILE_WLAN_PATHS = {
+        "2.4GHz": "/cgi/iux_get.cgi?tmenu=wirelessconf&smenu=macauth&act=status&wlmode=2g&bssidx=0",
+        "5GHz": "/cgi/iux_get.cgi?tmenu=wirelessconf&smenu=macauth&act=status&wlmode=5g&bssidx=65536",
+    }
+    MESH_LEGACY_PATH = "/sess-bin/timepro.cgi?tmenu=wirelessconf&smenu=easymesh"
+    MESH_MOBILE_PATH = "/cgi/iux_get.cgi?tmenu=sysconf&smenu=info&act=status"
+    MESH_STATION_PATH = "/easymesh/api.cgi?key=topology"
 
     _MAC_PATTERN = re.compile(r"([0-9A-Fa-f]{2}(?:[:-][0-9A-Fa-f]{2}){5})")
     _IP_PATTERN = re.compile(r"(\d{1,3}(?:\.\d{1,3}){3})")
@@ -82,8 +93,9 @@ class IptimeClient:
         self._username = username
         self._password = password
         self._session: aiohttp.ClientSession | None = None
-        self._api_mode: str | None = None
+        self._api_mode: str | None = None  # "beta" | "legacy" | "mobile"
         self._logged_in = False
+        self._mesh_enabled = False
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -122,27 +134,56 @@ class IptimeClient:
             raise UpdateFailed(f"ipTIME 연결 실패 ({path}): {err}") from err
 
     async def _supports_beta_ui(self) -> bool:
+        for path in (f"{self.BETA_UI_PATH}flutter_bootstrap.js", self.BETA_UI_PATH):
+            try:
+                _, text = await self._request_text("GET", path)
+            except UpdateFailed as err:
+                _LOGGER.debug("ipTIME 신형 UI 확인 실패(%s): %s", path, err)
+                continue
+            if self.BETA_SERVICE_PATH in text or "flutter" in text.lower():
+                return True
+        _LOGGER.debug("ipTIME 신형(Beta) UI 미감지, 다음 UI 확인")
+        return False
+
+    async def _supports_mobile_ui(self) -> bool:
         try:
-            _, text = await self._request_text("GET", self.BETA_UI_PATH)
-        except UpdateFailed:
+            _, text = await self._request_text("GET", self.HOSTINFO_PATH)
+        except UpdateFailed as err:
+            _LOGGER.debug("ipTIME 모바일 UI 확인 실패(%s): %s", self.HOSTINFO_PATH, err)
             return False
-        return self.BETA_SERVICE_PATH in text or "flutter" in text.lower()
+        found = "iux" in text.lower()
+        if not found:
+            _LOGGER.debug("ipTIME 모바일(IUX) UI 미감지, 구형 UI로 진행")
+        return found
 
     async def login(self) -> bool:
-        """Detect the router UI and create an authenticated session."""
+        """Detect the router UI (beta / mobile IUX / classic) and create a session.
+
+        Each `_login_*` helper either returns True or raises a specific
+        IptimeCaptchaRequired / IptimeAuthenticationError / UpdateFailed, so
+        the caller always learns exactly why a login attempt failed instead
+        of a generic False.
+        """
         self._logged_in = False
+        self._mesh_enabled = False
+
         if await self._supports_beta_ui():
             self._api_mode = "beta"
-            logged_in = await self._login_beta()
-            if logged_in:
-                _LOGGER.debug("ipTIME login succeeded using the current UI")
-            return logged_in
-
-        if await self._login_legacy():
+            await self._login_beta()
+            _LOGGER.info("ipTIME 로그인 성공: 신형(Beta) UI (%s)", self._base_url)
+        elif await self._supports_mobile_ui():
+            self._api_mode = "mobile"
+            await self._login_mobile()
+            _LOGGER.info("ipTIME 로그인 성공: 모바일(IUX) UI (%s)", self._base_url)
+        else:
             self._api_mode = "legacy"
-            _LOGGER.debug("ipTIME login succeeded using the classic UI")
-            return True
-        return False
+            await self._login_legacy()
+            _LOGGER.info("ipTIME 로그인 성공: 구형 UI (%s)", self._base_url)
+
+        self._mesh_enabled = await self._detect_mesh_enabled()
+        if self._mesh_enabled:
+            _LOGGER.info("ipTIME EasyMesh 감지됨: 위성 기기도 함께 추적합니다")
+        return True
 
     async def _login_beta(self) -> bool:
         response, payload = await self._request_json(
@@ -166,9 +207,32 @@ class IptimeClient:
         return True
 
     async def _login_legacy(self) -> bool:
+        """Try each known classic login handler; firmware only serves one of them."""
+        auth_error: IptimeAuthenticationError | None = None
+        last_error: UpdateFailed | None = None
+        for path in self.LEGACY_LOGIN_PATHS:
+            try:
+                if await self._attempt_legacy_login(path):
+                    return True
+            except IptimeCaptchaRequired:
+                raise
+            except IptimeAuthenticationError as err:
+                auth_error = err
+            except UpdateFailed as err:
+                # Keep the real reason (e.g. a connection failure) instead of
+                # silently discarding it in favor of a generic fallback below.
+                _LOGGER.debug("ipTIME 구형 로그인(%s) 실패: %s", path, err)
+                last_error = err
+        if auth_error:
+            raise auth_error
+        if last_error:
+            raise last_error
+        raise UpdateFailed("ipTIME 로그인 응답에서 세션을 찾지 못했습니다")
+
+    async def _attempt_legacy_login(self, path: str) -> bool:
         response, text = await self._request_text(
             "POST",
-            self.LEGACY_LOGIN_PATH,
+            path,
             data={"username": self._username, "passwd": self._password},
             allow_redirects=True,
         )
@@ -192,12 +256,37 @@ class IptimeClient:
             session.cookie_jar.update_cookies(
                 {"efm_session_id": session_in_body.group(1)}, response.url
             )
+        return self._logged_in
+
+    async def _login_mobile(self) -> bool:
+        response, text = await self._request_text(
+            "POST",
+            self.MOBILE_LOGIN_PATH,
+            data={"username": self._username, "passwd": self._password},
+        )
+        session = await self._get_session()
+        stored_cookie = session.cookie_jar.filter_cookies(response.url).get(
+            "efm_session_id"
+        )
+        session_in_body = re.search(r"\b([A-Za-z0-9]{16})\b", text)
+        if not stored_cookie and session_in_body:
+            session.cookie_jar.update_cookies(
+                {"efm_session_id": session_in_body.group(1)}, response.url
+            )
+            stored_cookie = session_in_body.group(1)
+        self._logged_in = bool(stored_cookie or session_in_body)
         if not self._logged_in:
-            raise UpdateFailed("ipTIME 로그인 응답에서 세션을 찾지 못했습니다")
+            raise IptimeAuthenticationError(
+                "ipTIME(모바일) 로그인 응답에서 세션을 찾지 못했습니다. 계정을 확인하세요"
+            )
         return True
 
     async def _request_json(
-        self, method_name: str, params: dict[str, Any] | None = None
+        self,
+        method_name: str,
+        params: dict[str, Any] | None = None,
+        *,
+        retry_on_auth: bool = True,
     ) -> tuple[aiohttp.ClientResponse, dict[str, Any]]:
         response, text = await self._request_text(
             "POST",
@@ -210,11 +299,31 @@ class IptimeClient:
             raise UpdateFailed(f"ipTIME JSON 응답 해석 실패 ({method_name})") from err
         if not isinstance(payload, dict):
             raise UpdateFailed(f"ipTIME JSON 응답 형식 오류 ({method_name})")
+
+        # Some firmware reports an expired session with codes/messages other than
+        # -31998, so also match on the error text itself and transparently retry
+        # once after a fresh login (mirrors the community iptime_manager project).
+        if retry_on_auth and self._looks_unauthorized(payload):
+            _LOGGER.debug("ipTIME 세션 만료 감지(%s), 재로그인 후 재시도", method_name)
+            self._logged_in = False
+            if await self._login_beta():
+                return await self._request_json(method_name, params, retry_on_auth=False)
         return response, payload
+
+    @staticmethod
+    def _looks_unauthorized(payload: dict[str, Any]) -> bool:
+        error = payload.get("error")
+        if not error:
+            return False
+        code = error.get("code")
+        message = str(error.get("message") or "").lower()
+        return code == -31998 or any(word in message for word in ("session", "login", "auth"))
 
     async def get_wireless_clients(self) -> list[WirelessClient]:
         if self._api_mode == "beta":
             return await self._get_beta_clients()
+        if self._api_mode == "mobile":
+            return await self._get_mobile_clients()
         return await self._get_legacy_clients()
 
     async def _get_beta_clients(self) -> list[WirelessClient]:
@@ -258,6 +367,91 @@ class IptimeClient:
                 )
             )
         return [client for client in clients if client.mac]
+
+    async def _get_mobile_clients(self) -> list[WirelessClient]:
+        clients: dict[str, WirelessClient] = {}
+        successful_requests = 0
+        for interface, path in self.MOBILE_WLAN_PATHS.items():
+            try:
+                _, text = await self._request_text("GET", path)
+            except UpdateFailed as err:
+                _LOGGER.debug("ipTIME(모바일) %s 조회 실패: %s", interface, err)
+                continue
+            try:
+                payload = json.loads(text)
+            except ValueError as err:
+                _LOGGER.debug("ipTIME(모바일) %s 응답 파싱 실패: %s", interface, err)
+                continue
+            successful_requests += 1
+            for device in payload.get("stalist") or []:
+                mac = self._normalize_mac(str(device.get("mac", "")))
+                if not mac:
+                    continue
+                clients[mac] = WirelessClient(
+                    mac=mac,
+                    ip=str(device.get("ipaddr") or ""),
+                    hostname=str(device.get("hostname") or device.get("name") or mac),
+                    interface=interface,
+                    rssi=self._as_int(device.get("rssi")),
+                )
+        # A router with zero connected devices is not a failure; only raise
+        # when every band request itself failed (matches _get_legacy_clients).
+        if not successful_requests:
+            raise UpdateFailed("ipTIME(모바일) 무선 접속자 페이지를 조회할 수 없습니다")
+        return list(clients.values())
+
+    async def _detect_mesh_enabled(self) -> bool:
+        """Whether this router has EasyMesh active (a topology query is only useful then)."""
+        try:
+            if self._api_mode == "beta":
+                _, payload = await self._request_json("easymesh/info", retry_on_auth=False)
+                result = payload.get("result") or {}
+                return bool(result.get("active"))
+            if self._api_mode == "mobile":
+                _, text = await self._request_text("GET", self.MESH_MOBILE_PATH)
+                return "easymesh" in json.loads(text)
+            _, text = await self._request_text("GET", self.MESH_LEGACY_PATH)
+            match = re.search(
+                r'<input\b[^>]*id="mode_none"[^>]*>', text, re.IGNORECASE | re.DOTALL
+            )
+            return bool(match and "checked" not in match.group(0).lower())
+        except (UpdateFailed, ValueError) as err:
+            _LOGGER.debug("ipTIME EasyMesh 감지 실패(정상: 메쉬 미사용 공유기일 수 있음): %s", err)
+            return False
+
+    async def get_mesh_clients(self, rssi_limit: int) -> list[WirelessClient]:
+        """Devices connected to EasyMesh satellite units, filtered by RSSI."""
+        if not self._mesh_enabled:
+            return []
+        try:
+            _, text = await self._request_text("GET", self.MESH_STATION_PATH)
+            data = json.loads(text)
+        except (UpdateFailed, ValueError) as err:
+            _LOGGER.debug("ipTIME EasyMesh 위성기기 조회 실패: %s", err)
+            return []
+
+        clients: list[WirelessClient] = []
+        for station in data.get("station") or []:
+            if not isinstance(station, dict):
+                continue
+            mac = self._normalize_mac(str(station.get("mac") or ""))
+            if not mac:
+                continue
+            if str(station.get("connection") or "").strip() in {"Unknown", "WIRED"}:
+                continue
+            rssi = self._as_int(station.get("rssi"))
+            if rssi is not None and rssi < rssi_limit:
+                continue
+            clients.append(
+                WirelessClient(
+                    mac=mac,
+                    ip=str(station.get("ip") or ""),
+                    hostname=str(station.get("name") or mac),
+                    interface=f"메쉬-{station.get('mode') or 'unknown'}",
+                    rssi=rssi,
+                )
+            )
+        return clients
 
     async def _get_legacy_clients(self) -> list[WirelessClient]:
         clients: dict[str, WirelessClient] = {}
@@ -374,7 +568,7 @@ class IptimeClient:
     async def get_static_leases(self) -> list[StaticLease]:
         return []
 
-    async def fetch_all(self) -> IptimeData:
+    async def fetch_all(self, rssi_limit: int = DEFAULT_RSSI_LIMIT) -> IptimeData:
         if not self._logged_in and not await self.login():
             raise UpdateFailed("ipTIME 로그인 실패: 계정 또는 CAPTCHA 설정을 확인하세요")
 
@@ -383,11 +577,12 @@ class IptimeClient:
         except UpdateFailed as err:
             if "세션 만료" not in str(err):
                 raise
-            if not await self.login():
-                raise UpdateFailed("ipTIME 재로그인 실패") from err
+            _LOGGER.info("ipTIME 세션 만료 감지, 재로그인 후 재조회합니다")
+            await self.login()  # raises with the specific reason if this fails too
             wireless = await self.get_wireless_clients()
 
         dhcp = await self.get_dhcp_leases() if self._api_mode == "legacy" else []
+        mesh = await self.get_mesh_clients(rssi_limit) if self._mesh_enabled else []
         connected = {client.mac: client for client in wireless}
         # The classic UI exposes wired clients through lan_pcinfo_status and
         # wireless clients through separate per-band pages.
@@ -401,6 +596,10 @@ class IptimeClient:
                     interface="LAN/unknown",
                 ),
             )
+        # EasyMesh satellite stations aren't visible to the main router's own
+        # client list, so they're merged in (and take priority: they carry RSSI).
+        for client in mesh:
+            connected[client.mac] = client
         connected_clients = list(connected.values())
         wireless_clients = [
             client
@@ -408,10 +607,11 @@ class IptimeClient:
             if client.interface not in {"wired", "ethernet", "LAN/unknown"}
         ]
         _LOGGER.debug(
-            "ipTIME update (%s): %d connected clients (%d wireless)",
+            "ipTIME update (%s): %d connected clients (%d wireless, %d mesh)",
             self._api_mode,
             len(connected_clients),
             len(wireless_clients),
+            len(mesh),
         )
         return IptimeData(
             connected_clients=connected_clients,
@@ -447,7 +647,9 @@ class IptimeClient:
 class IptimeDataUpdateCoordinator(DataUpdateCoordinator[IptimeData]):
     """Coordinate periodic ipTIME client updates."""
 
-    def __init__(self, hass: HomeAssistant, client: IptimeClient) -> None:
+    def __init__(
+        self, hass: HomeAssistant, client: IptimeClient, entry: ConfigEntry
+    ) -> None:
         super().__init__(
             hass,
             _LOGGER,
@@ -455,6 +657,10 @@ class IptimeDataUpdateCoordinator(DataUpdateCoordinator[IptimeData]):
             update_interval=timedelta(seconds=SCAN_INTERVAL),
         )
         self.client = client
+        self.entry = entry
 
     async def _async_update_data(self) -> IptimeData:
-        return await self.client.fetch_all()
+        rssi_limit = self.entry.options.get(
+            CONF_RSSI_LIMIT, self.entry.data.get(CONF_RSSI_LIMIT, DEFAULT_RSSI_LIMIT)
+        )
+        return await self.client.fetch_all(rssi_limit=rssi_limit)

@@ -3,11 +3,17 @@
     "step": {
       "user": {
         "title": "ipTIME Router Setup",
-        "description": "Enter the router administrator credentials. Include the port in the address when needed.",
+        "description": "Enter the router administrator credentials. Include the port in the address when needed.{error_detail}",
         "data": {
           "host": "Router address",
           "username": "Administrator username",
-          "password": "Administrator password"
+          "password": "Administrator password",
+          "consider_home": "Away detection delay (seconds)",
+          "rssi_limit": "Mesh device RSSI threshold (dBm)"
+        },
+        "data_description": {
+          "consider_home": "Keeps a device marked 'home' for this many seconds after it drops off the client list, to avoid flapping caused by Wi-Fi power save.",
+          "rssi_limit": "Only applies to EasyMesh satellite stations. A weaker signal than this is treated as not home."
         }
       }
     },
@@ -18,7 +24,23 @@
       "unknown": "An unexpected error occurred. Check the Home Assistant log."
     },
     "abort": {
-      "already_configured": "This router is already configured."
+      "already_configured": "This router is already configured.",
+      "cannot_connect": "Could not automatically discover the router."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "ipTIME Tracker Options",
+        "data": {
+          "consider_home": "Away detection delay (seconds)",
+          "rssi_limit": "Mesh device RSSI threshold (dBm)"
+        },
+        "data_description": {
+          "consider_home": "Keeps a device marked 'home' for this many seconds after it drops off the client list.",
+          "rssi_limit": "Only applies to EasyMesh satellite stations. A weaker signal than this is treated as not home."
+        }
+      }
     }
   }
 }

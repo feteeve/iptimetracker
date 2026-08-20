@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 
 from homeassistant.components.device_tracker import ScannerEntity, SourceType
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.util import dt as dt_util
 
-from .const import DOMAIN
+from .const import CONF_CONSIDER_HOME, DEFAULT_CONSIDER_HOME, DOMAIN
 from .coordinator import IptimeDataUpdateCoordinator, WirelessClient
 
 _LOGGER = logging.getLogger(__name__)
@@ -29,7 +31,7 @@ async def async_setup_entry(
         for client in coordinator.data.connected_clients:
             if client.mac not in tracked:
                 tracked.add(client.mac)
-                new_entities.append(IptimeDeviceTracker(coordinator, client.mac))
+                new_entities.append(IptimeDeviceTracker(coordinator, entry, client.mac))
         if new_entities:
             async_add_entities(new_entities)
 
@@ -38,14 +40,23 @@ async def async_setup_entry(
 
 
 class IptimeDeviceTracker(CoordinatorEntity[IptimeDataUpdateCoordinator], ScannerEntity):
-    """Track a device currently connected to the ipTIME router."""
+    """Track a device currently connected to the ipTIME router.
+
+    A device that briefly drops off the client list (Wi-Fi power save, a
+    weak-signal hiccup) is kept "home" for CONF_CONSIDER_HOME seconds instead
+    of flipping to "away" immediately, to avoid presence flapping.
+    """
 
     _attr_source_type = SourceType.ROUTER
 
-    def __init__(self, coordinator: IptimeDataUpdateCoordinator, mac: str) -> None:
+    def __init__(
+        self, coordinator: IptimeDataUpdateCoordinator, entry: ConfigEntry, mac: str
+    ) -> None:
         super().__init__(coordinator)
         self._mac = mac
+        self._entry = entry
         self._attr_unique_id = f"{DOMAIN}_{mac.replace(':', '_')}"
+        self._last_seen: datetime | None = None
 
     @property
     def _client(self) -> WirelessClient | None:
@@ -56,7 +67,18 @@ class IptimeDeviceTracker(CoordinatorEntity[IptimeDataUpdateCoordinator], Scanne
 
     @property
     def is_connected(self) -> bool:
-        return self._client is not None
+        if self._client is not None:
+            self._last_seen = dt_util.utcnow()
+            return True
+
+        if self._last_seen is None:
+            return False
+
+        consider_home = self._entry.options.get(
+            CONF_CONSIDER_HOME,
+            self._entry.data.get(CONF_CONSIDER_HOME, DEFAULT_CONSIDER_HOME),
+        )
+        return (dt_util.utcnow() - self._last_seen).total_seconds() < consider_home
 
     @property
     def mac_address(self) -> str:
@@ -95,6 +117,8 @@ class IptimeDeviceTracker(CoordinatorEntity[IptimeDataUpdateCoordinator], Scanne
             attrs["interface"] = c.interface
             if c.rssi is not None:
                 attrs["rssi_dbm"] = c.rssi
+        if self._last_seen is not None:
+            attrs["last_seen"] = self._last_seen.isoformat()
 
         # 고정IP 여부
         for static in self.coordinator.data.static_leases:
