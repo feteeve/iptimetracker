@@ -17,6 +17,21 @@ ipTIME 공유기에 접속된 기기를 Home Assistant에서 추적하는 커스
 4. 설치 후 Home Assistant 재시작
 5. 설정 → 통합 구성요소 → ipTIME Tracker 추가
 
+## Home Assistant 없이 먼저 테스트
+
+공유기 로그인과 접속자 조회를 빠르게 확인하려면 PC에서 독립 실행형 테스트 앱을 실행하세요.
+
+```bash
+python tools/iptime_probe.py
+```
+
+창에 공유기 주소, 관리자 아이디, 비밀번호를 입력하고 **로그인 및 접속자 조회**를 누르면 됩니다.
+터미널에서 실행하려면 다음 명령을 사용하세요. 비밀번호를 명령에 쓰지 않으면 화면에 표시되지 않게 입력받습니다.
+
+```bash
+python tools/iptime_probe.py --cli --host 192.168.0.1 --username admin
+```
+
 ## 설정
 
 | 항목 | 설명 | 기본값 |
