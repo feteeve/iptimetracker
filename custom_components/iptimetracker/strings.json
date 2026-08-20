@@ -8,10 +8,12 @@
           "host": "공유기 주소",
           "username": "관리자 아이디",
           "password": "관리자 비밀번호",
+          "scan_interval": "탐지 주기(초)",
           "consider_home": "외출 판단 지연 시간(초)",
           "rssi_limit": "메쉬 기기 RSSI 기준치(dBm)"
         },
         "data_description": {
+          "scan_interval": "공유기에서 접속 기기 목록을 다시 조회하는 주기입니다(10~3600초).",
           "consider_home": "기기가 접속자 목록에서 사라진 뒤에도 이 시간(초) 동안은 '재실'로 유지합니다. 절전모드로 인한 깜빡임 방지용입니다.",
           "rssi_limit": "EasyMesh 위성 기기에만 적용됩니다. 신호가 이 값보다 약하면 재실로 보지 않습니다."
         }
@@ -33,10 +35,12 @@
       "init": {
         "title": "ipTIME Tracker 옵션",
         "data": {
+          "scan_interval": "탐지 주기(초)",
           "consider_home": "외출 판단 지연 시간(초)",
           "rssi_limit": "메쉬 기기 RSSI 기준치(dBm)"
         },
         "data_description": {
+          "scan_interval": "공유기에서 접속 기기 목록을 다시 조회하는 주기입니다(10~3600초).",
           "consider_home": "기기가 접속자 목록에서 사라진 뒤에도 이 시간(초) 동안은 '재실'로 유지합니다.",
           "rssi_limit": "EasyMesh 위성 기기에만 적용됩니다. 신호가 이 값보다 약하면 재실로 보지 않습니다."
         }

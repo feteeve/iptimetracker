@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from homeassistant.components.device_tracker import ScannerEntity, SourceType
 from homeassistant.config_entries import ConfigEntry
@@ -22,6 +22,15 @@ _STORE_VERSION = 1
 _MAC_UNIQUE_ID_PATTERN = re.compile(
     r"(?:^|_)([0-9A-Fa-f]{2}(?:[:_-][0-9A-Fa-f]{2}){5})$"
 )
+# Devices that never reconnect (a guest's phone, a one-off IoT visitor) would
+# otherwise pile up in the "known devices" store forever, each keeping its
+# own device_tracker entity around indefinitely. Drop anything not seen in
+# this many days.
+_KNOWN_DEVICE_RETENTION_DAYS = 30
+# How rarely a connected device's stored timestamp needs refreshing. Coarse on
+# purpose: the retention check only cares about ~30-day staleness, so there is
+# no reason to write the known-devices Store to disk on every 30s poll.
+_LAST_SEEN_REFRESH_INTERVAL = timedelta(hours=6)
 
 
 def _unique_id(entry: ConfigEntry, mac: str) -> str:
@@ -42,12 +51,15 @@ async def async_setup_entry(
 ) -> None:
     coordinator: IptimeDataUpdateCoordinator = hass.data[DOMAIN][entry.entry_id]
 
-    store: Store[dict[str, list[str]]] = Store(
+    store: Store[dict[str, object]] = Store(
         hass, _STORE_VERSION, f"{DOMAIN}.{entry.entry_id}.known_devices"
     )
     stored = await store.async_load() or {}
+    last_seen_map: dict[str, str] = dict(stored.get("last_seen") or {})
     tracked: set[str] = set()
-    for stored_mac in stored.get("macs", []):
+    # "macs" is the pre-retention store format (no timestamps); keep reading
+    # it so devices saved by an older release aren't dropped outright.
+    for stored_mac in stored.get("macs") or list(last_seen_map):
         if mac := _mac_from_unique_id(stored_mac):
             tracked.add(mac)
 
@@ -61,6 +73,40 @@ async def async_setup_entry(
         if not mac:
             continue
         tracked.add(mac)
+
+    # Give every tracked device a baseline timestamp (rather than leaving it
+    # unset forever) so devices carried over from a pre-retention store, or
+    # from the entity registry, still age out eventually if they never
+    # reconnect after this upgrade.
+    now = dt_util.utcnow()
+    now_iso = now.isoformat()
+    for mac in tracked:
+        last_seen_map.setdefault(mac, now_iso)
+
+    cutoff = now - timedelta(days=_KNOWN_DEVICE_RETENTION_DAYS)
+    stale_macs: set[str] = set()
+    for mac in tracked:
+        last_seen = dt_util.parse_datetime(last_seen_map.get(mac, now_iso))
+        if last_seen is not None and last_seen < cutoff:
+            stale_macs.add(mac)
+    tracked -= stale_macs
+    for mac in stale_macs:
+        last_seen_map.pop(mac, None)
+        _LOGGER.info(
+            "ipTIME: %d일 이상 미접속 기기를 목록에서 제거: %s",
+            _KNOWN_DEVICE_RETENTION_DAYS,
+            mac,
+        )
+
+    for registry_entry in er.async_entries_for_config_entry(registry, entry.entry_id):
+        if registry_entry.domain != "device_tracker" or registry_entry.platform != DOMAIN:
+            continue
+        mac = _mac_from_unique_id(registry_entry.unique_id)
+        if not mac:
+            continue
+        if mac in stale_macs:
+            registry.async_remove(registry_entry.entity_id)
+            continue
         expected_unique_id = _unique_id(entry, mac)
         if registry_entry.unique_id != expected_unique_id:
             registry.async_update_entity(
@@ -70,14 +116,24 @@ async def async_setup_entry(
     added: set[str] = set()
 
     async def _save_known_devices() -> None:
-        await store.async_save({"macs": sorted(tracked)})
+        await store.async_save({"last_seen": last_seen_map})
 
     @callback
     def _add_new_devices() -> None:
         changed = False
+        now = dt_util.utcnow()
         for client in coordinator.data.connected_clients:
             if client.mac not in tracked:
                 tracked.add(client.mac)
+                last_seen_map[client.mac] = now.isoformat()
+                changed = True
+                continue
+            stored_last_seen = dt_util.parse_datetime(last_seen_map.get(client.mac, ""))
+            if (
+                stored_last_seen is None
+                or (now - stored_last_seen) > _LAST_SEEN_REFRESH_INTERVAL
+            ):
+                last_seen_map[client.mac] = now.isoformat()
                 changed = True
         if changed:
             hass.async_create_task(_save_known_devices())

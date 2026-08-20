@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import html as html_lib
 import json
 import logging
@@ -15,7 +16,13 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .const import CONF_RSSI_LIMIT, DEFAULT_RSSI_LIMIT, DOMAIN, SCAN_INTERVAL
+from .const import (
+    CONF_RSSI_LIMIT,
+    CONF_SCAN_INTERVAL,
+    DEFAULT_RSSI_LIMIT,
+    DEFAULT_SCAN_INTERVAL,
+    DOMAIN,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -107,11 +114,22 @@ class IptimeClient:
         self._logged_in = False
         self._mesh_enabled = False
 
-    @staticmethod
-    def normalize_host(host: str) -> str:
-        """Return a stable router origin used by HTTP and config unique IDs."""
+    _SCHEME_PREFIX_PATTERN = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://")
+
+    @classmethod
+    def normalize_host(cls, host: str) -> str:
+        """Return a stable router origin used by HTTP and config unique IDs.
+
+        Checking for a literal "scheme://" prefix (rather than trusting
+        urlsplit's bare `.scheme`) matters because urlsplit misreads a
+        hostname:port with no scheme, e.g. "router.local:8080", as
+        scheme="router.local" / path="8080" — an IP like "192.168.0.1:8080"
+        happens to dodge this since a scheme can't start with a digit, but a
+        DNS hostname does not, and normalize_host would otherwise wrongly
+        reject a perfectly valid address.
+        """
         value = host.strip()
-        if not urlsplit(value).scheme:
+        if not cls._SCHEME_PREFIX_PATTERN.match(value):
             value = f"http://{value}"
         parsed = urlsplit(value)
         if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
@@ -214,17 +232,10 @@ class IptimeClient:
         auth_error: IptimeAuthenticationError | None = None
         last_error: UpdateFailed | None = None
         for mode, login_method in candidates:
-            self._api_mode = mode
-            self._logged_in = False
-            await self._clear_session_cookies()
             try:
-                await login_method()
-                # A login cookie alone is not enough: some firmware exposes an
-                # endpoint but not the matching client-list API. Validate the
-                # complete mode before selecting it.
-                await self.get_wireless_clients()
-                _LOGGER.info("ipTIME 로그인 성공: %s UI (%s)", mode, self._base_url)
-                break
+                if await self._try_login_candidate(mode, login_method):
+                    _LOGGER.info("ipTIME 로그인 성공: %s UI (%s)", mode, self._base_url)
+                    break
             except IptimeCaptchaRequired:
                 raise
             except IptimeAuthenticationError as err:
@@ -244,6 +255,42 @@ class IptimeClient:
         if self._mesh_enabled:
             _LOGGER.info("ipTIME EasyMesh 감지됨: 위성 기기도 함께 추적합니다")
         return True
+
+    async def _try_login_candidate(self, mode: str, login_method: Any) -> bool:
+        """Attempt one login mode, validating that its client-list API works too.
+
+        UI modes we positively detected (beta/mobile) get a single same-mode
+        retry before login() moves on to a completely different protocol.
+        Without this, one transient hiccup on the router's real, working API
+        would cascade into hammering it with 2-3 other login sequences that
+        are guaranteed not to exist on that firmware — amplifying load on a
+        router that's already struggling instead of just trying again.
+        """
+        attempts = 2 if mode in {"beta", "mobile"} else 1
+        last_err: UpdateFailed | None = None
+        for attempt in range(1, attempts + 1):
+            if attempt > 1:
+                await asyncio.sleep(1)
+            self._api_mode = mode
+            self._logged_in = False
+            await self._clear_session_cookies()
+            try:
+                await login_method()
+                # A login cookie alone is not enough: some firmware exposes an
+                # endpoint but not the matching client-list API. Validate the
+                # complete mode before selecting it.
+                await self.get_wireless_clients()
+                return True
+            except (IptimeCaptchaRequired, IptimeAuthenticationError):
+                raise
+            except UpdateFailed as err:
+                last_err = err
+                _LOGGER.debug(
+                    "ipTIME %s 로그인 시도 %d/%d 실패: %s", mode, attempt, attempts, err
+                )
+        if last_err:
+            raise last_err
+        return False
 
     async def _login_beta(self) -> bool:
         response, payload = await self._request_json(
@@ -684,7 +731,8 @@ class IptimeClient:
                 _, page = await self._request_text(
                     method, self.LEGACY_DATA_PATH, **request_data
                 )
-            except UpdateFailed:
+            except UpdateFailed as err:
+                _LOGGER.debug("ipTIME DHCP 조회(%s) 실패: %s", method, err)
                 continue
             if self._is_login_page(page):
                 self._logged_in = False
@@ -862,11 +910,15 @@ class IptimeDataUpdateCoordinator(DataUpdateCoordinator[IptimeData]):
     def __init__(
         self, hass: HomeAssistant, client: IptimeClient, entry: ConfigEntry
     ) -> None:
+        scan_interval = entry.options.get(
+            CONF_SCAN_INTERVAL,
+            entry.data.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL),
+        )
         super().__init__(
             hass,
             _LOGGER,
             name=DOMAIN,
-            update_interval=timedelta(seconds=SCAN_INTERVAL),
+            update_interval=timedelta(seconds=scan_interval),
         )
         self.client = client
         self.entry = entry

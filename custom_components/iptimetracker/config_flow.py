@@ -18,10 +18,12 @@ from .const import (
     CONF_HOST,
     CONF_PASSWORD,
     CONF_RSSI_LIMIT,
+    CONF_SCAN_INTERVAL,
     CONF_USERNAME,
     DEFAULT_CONSIDER_HOME,
     DEFAULT_HOST,
     DEFAULT_RSSI_LIMIT,
+    DEFAULT_SCAN_INTERVAL,
     DEFAULT_USERNAME,
     DOMAIN,
 )
@@ -36,6 +38,7 @@ _LOGGER = logging.getLogger(__name__)
 
 CONSIDER_HOME_VALIDATOR = vol.All(vol.Coerce(int), vol.Range(min=0, max=86400))
 RSSI_VALIDATOR = vol.All(vol.Coerce(int), vol.Range(min=-120, max=0))
+SCAN_INTERVAL_VALIDATOR = vol.All(vol.Coerce(int), vol.Range(min=10, max=3600))
 
 
 def _user_schema(*, default_host: str) -> vol.Schema:
@@ -44,6 +47,9 @@ def _user_schema(*, default_host: str) -> vol.Schema:
             vol.Required(CONF_HOST, default=default_host): str,
             vol.Required(CONF_USERNAME, default=DEFAULT_USERNAME): str,
             vol.Required(CONF_PASSWORD): str,
+            vol.Optional(
+                CONF_SCAN_INTERVAL, default=DEFAULT_SCAN_INTERVAL
+            ): SCAN_INTERVAL_VALIDATOR,
             vol.Optional(
                 CONF_CONSIDER_HOME, default=DEFAULT_CONSIDER_HOME
             ): CONSIDER_HOME_VALIDATOR,
@@ -194,6 +200,10 @@ class IptimeTrackerOptionsFlow(OptionsFlow):
             return self.async_create_entry(title="", data=user_input)
 
         config_entry = getattr(self, "config_entry", self._provided_config_entry)
+        current_scan_interval = config_entry.options.get(
+            CONF_SCAN_INTERVAL,
+            config_entry.data.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL),
+        )
         current_consider_home = config_entry.options.get(
             CONF_CONSIDER_HOME,
             config_entry.data.get(CONF_CONSIDER_HOME, DEFAULT_CONSIDER_HOME),
@@ -206,6 +216,9 @@ class IptimeTrackerOptionsFlow(OptionsFlow):
             step_id="init",
             data_schema=vol.Schema(
                 {
+                    vol.Optional(
+                        CONF_SCAN_INTERVAL, default=current_scan_interval
+                    ): SCAN_INTERVAL_VALIDATOR,
                     vol.Optional(
                         CONF_CONSIDER_HOME, default=current_consider_home
                     ): CONSIDER_HOME_VALIDATOR,
