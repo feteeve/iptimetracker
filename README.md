@@ -33,6 +33,11 @@ python tools/iptime_probe.py
 python tools/iptime_probe.py --cli --host 192.168.0.1 --username admin
 ```
 
+### Android 테스트 앱
+
+`android/` 폴더를 Android Studio에서 열어 실행할 수 있습니다. 앱에서 접속 방식을 바꾸며
+로그인, 세션 유지, 전체 접속자 조회를 반복 테스트할 수 있고 관리자 비밀번호는 저장하지 않습니다.
+
 ## 설정
 
 | 항목 | 설명 | 기본값 |
