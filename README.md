@@ -12,7 +12,7 @@ ipTIME 공유기에 접속된 기기를 Home Assistant에서 추적하는 커스
 ## 설치 (HACS)
 
 1. HACS → 사용자 정의 저장소 추가
-2. URL: `https://github.com/feteeve0/iptimetracker`
+2. URL: `https://github.com/feteeve/iptimetracker`
 3. 카테고리: Integration
 4. 설치 후 Home Assistant 재시작
 5. 설정 → 통합 구성요소 → ipTIME Tracker 추가
