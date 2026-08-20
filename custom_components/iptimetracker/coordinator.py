@@ -19,6 +19,14 @@ from .const import DOMAIN, SCAN_INTERVAL
 _LOGGER = logging.getLogger(__name__)
 
 
+class IptimeAuthenticationError(UpdateFailed):
+    """Raised when the router rejects the administrator credentials."""
+
+
+class IptimeCaptchaRequired(UpdateFailed):
+    """Raised when interactive CAPTCHA authentication is enabled."""
+
+
 @dataclass
 class WirelessClient:
     mac: str
@@ -141,9 +149,21 @@ class IptimeClient:
             "session/login", {"id": self._username, "pw": self._password}
         )
         self._logged_in = bool(payload.get("result"))
-        if not self._logged_in and (payload.get("error") or {}).get("code") == -31997:
-            _LOGGER.error("ipTIME login requires CAPTCHA; change router login settings")
-        return self._logged_in and "efm_session_id" in response.cookies
+        if not self._logged_in:
+            error = payload.get("error") or {}
+            if error.get("code") == -31997:
+                raise IptimeCaptchaRequired("ipTIME 관리자 CAPTCHA 인증이 활성화되어 있습니다")
+            if error.get("code") == -31996:
+                raise IptimeAuthenticationError("ipTIME 관리자 계정이 올바르지 않습니다")
+            raise UpdateFailed(f"ipTIME 로그인 API 오류: {error}")
+
+        session = await self._get_session()
+        stored_cookie = session.cookie_jar.filter_cookies(response.url).get(
+            "efm_session_id"
+        )
+        if "efm_session_id" not in response.cookies and not stored_cookie:
+            raise UpdateFailed("ipTIME 로그인 응답에 세션 쿠키가 없습니다")
+        return True
 
     async def _login_legacy(self) -> bool:
         response, text = await self._request_text(
@@ -153,19 +173,28 @@ class IptimeClient:
             allow_redirects=True,
         )
         session_cookie = response.cookies.get("efm_session_id")
+        session = await self._get_session()
+        stored_cookie = session.cookie_jar.filter_cookies(response.url).get(
+            "efm_session_id"
+        )
         session_in_body = re.search(r"\b([A-Za-z0-9]{16})\b", text)
+        if "captcha" in text.lower() and "captcha_on" not in text.lower():
+            raise IptimeCaptchaRequired("ipTIME 관리자 CAPTCHA 인증이 활성화되어 있습니다")
         login_failed = (
             "login_session.cgi?noauto=1" in text
             or 'name="passwd"' in text
             or "efm_pwchk" in text
         )
-        self._logged_in = not login_failed and bool(session_cookie or session_in_body)
-        if self._logged_in and not session_cookie and session_in_body:
-            session = await self._get_session()
+        if login_failed:
+            raise IptimeAuthenticationError("ipTIME 관리자 계정이 올바르지 않습니다")
+        self._logged_in = bool(session_cookie or stored_cookie or session_in_body)
+        if self._logged_in and not session_cookie and not stored_cookie and session_in_body:
             session.cookie_jar.update_cookies(
                 {"efm_session_id": session_in_body.group(1)}, response.url
             )
-        return self._logged_in
+        if not self._logged_in:
+            raise UpdateFailed("ipTIME 로그인 응답에서 세션을 찾지 못했습니다")
+        return True
 
     async def _request_json(
         self, method_name: str, params: dict[str, Any] | None = None

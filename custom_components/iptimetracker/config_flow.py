@@ -1,11 +1,20 @@
 from __future__ import annotations
 
+import logging
+
 import voluptuous as vol
 
 from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
 
 from .const import CONF_HOST, CONF_PASSWORD, CONF_USERNAME, DEFAULT_HOST, DEFAULT_USERNAME, DOMAIN
-from .coordinator import IptimeClient, UpdateFailed
+from .coordinator import (
+    IptimeAuthenticationError,
+    IptimeCaptchaRequired,
+    IptimeClient,
+    UpdateFailed,
+)
+
+_LOGGER = logging.getLogger(__name__)
 
 STEP_USER_DATA_SCHEMA = vol.Schema(
     {
@@ -43,9 +52,15 @@ class IptimeTrackerConfigFlow(ConfigFlow, domain=DOMAIN):
                         title=f"ipTIME ({user_input[CONF_HOST]})",
                         data=user_input,
                     )
-            except UpdateFailed:
+            except IptimeCaptchaRequired:
+                errors["base"] = "captcha_required"
+            except IptimeAuthenticationError:
+                errors["base"] = "invalid_auth"
+            except UpdateFailed as err:
+                _LOGGER.error("ipTIME connection validation failed: %s", err)
                 errors["base"] = "cannot_connect"
             except Exception:  # noqa: BLE001
+                _LOGGER.exception("Unexpected error while validating ipTIME connection")
                 errors["base"] = "unknown"
             finally:
                 await client.close()
