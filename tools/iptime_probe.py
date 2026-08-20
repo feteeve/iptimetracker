@@ -60,6 +60,7 @@ class IptimeProbe:
         password: str,
         log: Callable[[str], None] = print,
         timeout: float = 10,
+        mode: str = "auto",
     ) -> None:
         host = host.strip().rstrip("/")
         if not urllib.parse.urlsplit(host).scheme:
@@ -69,6 +70,7 @@ class IptimeProbe:
         self.password = password
         self.log = log
         self.timeout = timeout
+        self.requested_mode = mode
         self.cookies = http.cookiejar.CookieJar()
         self.opener = urllib.request.build_opener(
             urllib.request.HTTPCookieProcessor(self.cookies)
@@ -77,13 +79,23 @@ class IptimeProbe:
 
     def run(self) -> list[ConnectedDevice]:
         self.log(f"공유기 접속 확인: {self.base_url}")
-        beta = self._supports_beta_ui()
-        self.mode = "beta" if beta else "legacy"
-        self.log(f"관리 UI 감지: {'신형(Beta)' if beta else '구형(Classic)'}")
+        if self.requested_mode == "auto":
+            self.mode = "beta" if self._supports_beta_ui() else "original"
+        else:
+            self.mode = self.requested_mode
+        mode_labels = {
+            "beta": "신형(Beta API)",
+            "original": "수정 전 방식(timepro POST)",
+            "legacy": "구형 로그인 핸들러",
+        }
+        self.log(f"사용 방식: {mode_labels[self.mode]}")
 
-        if beta:
+        if self.mode == "beta":
             self._login_beta()
             devices = self._fetch_beta_devices()
+        elif self.mode == "original":
+            self._login_original()
+            devices = self._fetch_original_devices()
         else:
             self._login_legacy()
             devices = self._fetch_legacy_devices()
@@ -225,6 +237,29 @@ class IptimeProbe:
             raise ProbeError("로그인 응답에서 세션 값을 찾지 못했습니다")
         self.log("구형 UI 로그인 성공")
 
+    def _login_original(self) -> None:
+        """Use the exact login request used before the integration rewrite."""
+        text, _ = self._request(
+            "POST",
+            "/sess-bin/timepro.cgi",
+            form={
+                "tmenu": "iframe",
+                "smenu": "login_proc",
+                "username": self.username,
+                "passwd": self.password,
+            },
+        )
+        if (
+            'name="passwd"' in text
+            or 'name="username"' in text
+            or "efm_pwchk" in text
+        ):
+            raise AuthenticationError("관리자 아이디 또는 비밀번호가 틀렸습니다")
+        self.log(
+            "수정 전 방식 로그인 응답 성공 "
+            f"(세션 쿠키: {'있음' if self._has_session_cookie() else '없음'})"
+        )
+
     def _has_session_cookie(self) -> bool:
         return any(cookie.name == "efm_session_id" for cookie in self.cookies)
 
@@ -280,6 +315,28 @@ class IptimeProbe:
         self._ensure_not_login_page(text)
         for device in self.parse_html_devices(text, "LAN/unknown"):
             devices.setdefault(device.mac, device)
+        return list(devices.values())
+
+    def _fetch_original_devices(self) -> list[ConnectedDevice]:
+        """Use the original POST-based menus so router behavior can be compared."""
+        devices: dict[str, ConnectedDevice] = {}
+        menus = (
+            ("wireless_association", "2.4GHz"),
+            ("wireless_association_5g", "5GHz"),
+            ("wireless_association_6g", "6GHz"),
+            ("lan_pcinfo_status", "LAN/unknown"),
+        )
+        for menu, label in menus:
+            text, _ = self._request(
+                "POST",
+                "/sess-bin/timepro.cgi",
+                form={"tmenu": "iframe", "smenu": menu},
+            )
+            self._ensure_not_login_page(text)
+            parsed = self.parse_html_devices(text, label)
+            self.log(f"원래 메뉴 {menu}: {len(parsed)}대 파싱")
+            for device in parsed:
+                devices.setdefault(device.mac, device)
         return list(devices.values())
 
     @classmethod
@@ -359,7 +416,7 @@ def format_devices(devices: list[ConnectedDevice]) -> list[str]:
 
 def run_cli(args: argparse.Namespace) -> int:
     password = args.password or getpass.getpass("관리자 비밀번호: ")
-    probe = IptimeProbe(args.host, args.username, password)
+    probe = IptimeProbe(args.host, args.username, password, mode=args.mode)
     try:
         devices = probe.run()
     except ProbeError as error:
@@ -410,12 +467,30 @@ def run_gui(default_host: str, default_username: str) -> None:
         output.see("end")
         output.configure(state="disabled")
 
-    def worker(host: str, username: str, password: str) -> None:
+    mode_var = tk.StringVar(value="original")
+    mode_values = {
+        "수정 전 방식 (권장 테스트)": "original",
+        "자동 감지": "auto",
+        "신형 Beta API": "beta",
+        "구형 로그인 핸들러": "legacy",
+    }
+    mode_label_var = tk.StringVar(value="수정 전 방식 (권장 테스트)")
+    ttk.Label(form, text="접속 방식").grid(row=2, column=0, pady=(10, 0), sticky="w")
+    ttk.Combobox(
+        form,
+        textvariable=mode_label_var,
+        values=list(mode_values),
+        state="readonly",
+        width=28,
+    ).grid(row=3, column=0, columnspan=2, sticky="w")
+
+    def worker(host: str, username: str, password: str, mode: str) -> None:
         probe = IptimeProbe(
             host,
             username,
             password,
             log=lambda message: result_queue.put(("log", message)),
+            mode=mode,
         )
         try:
             result_queue.put(("devices", probe.run()))
@@ -429,7 +504,13 @@ def run_gui(default_host: str, default_username: str) -> None:
         output.delete("1.0", "end")
         output.configure(state="disabled")
         test_button.configure(state="disabled")
-        values = (host_var.get(), username_var.get(), password_var.get())
+        mode_var.set(mode_values[mode_label_var.get()])
+        values = (
+            host_var.get(),
+            username_var.get(),
+            password_var.get(),
+            mode_var.get(),
+        )
         threading.Thread(target=worker, args=values, daemon=True).start()
 
     def poll() -> None:
@@ -463,6 +544,12 @@ def main() -> int:
     parser.add_argument("--host", default="192.168.0.1", help="공유기 주소")
     parser.add_argument("--username", default="admin", help="관리자 아이디")
     parser.add_argument("--password", help="관리자 비밀번호(생략하면 안전하게 입력)")
+    parser.add_argument(
+        "--mode",
+        choices=("auto", "original", "beta", "legacy"),
+        default="original",
+        help="접속 방식(기본값: 수정 전 original 방식)",
+    )
     args = parser.parse_args()
     if args.cli:
         return run_cli(args)
