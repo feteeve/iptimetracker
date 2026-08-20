@@ -26,7 +26,7 @@ async def async_setup_entry(
     @callback
     def _add_new_devices() -> None:
         new_entities = []
-        for client in coordinator.data.wireless_clients:
+        for client in coordinator.data.connected_clients:
             if client.mac not in tracked:
                 tracked.add(client.mac)
                 new_entities.append(IptimeDeviceTracker(coordinator, client.mac))
@@ -38,7 +38,7 @@ async def async_setup_entry(
 
 
 class IptimeDeviceTracker(CoordinatorEntity[IptimeDataUpdateCoordinator], ScannerEntity):
-    """ipTIME 무선 접속 기기 트래커."""
+    """Track a device currently connected to the ipTIME router."""
 
     _attr_source_type = SourceType.ROUTER
 
@@ -49,7 +49,7 @@ class IptimeDeviceTracker(CoordinatorEntity[IptimeDataUpdateCoordinator], Scanne
 
     @property
     def _client(self) -> WirelessClient | None:
-        for c in self.coordinator.data.wireless_clients:
+        for c in self.coordinator.data.connected_clients:
             if c.mac == self._mac:
                 return c
         return None

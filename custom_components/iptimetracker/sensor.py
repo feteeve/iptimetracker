@@ -21,6 +21,7 @@ async def async_setup_entry(
 ) -> None:
     coordinator: IptimeDataUpdateCoordinator = hass.data[DOMAIN][entry.entry_id]
     async_add_entities([
+        IptimeConnectedCountSensor(coordinator, entry),
         IptimeWirelessCountSensor(coordinator, entry),
         IptimeDhcpCountSensor(coordinator, entry),
         IptimeStaticLeasesSensor(coordinator, entry),
@@ -31,6 +32,34 @@ class _IptimeBaseSensor(CoordinatorEntity[IptimeDataUpdateCoordinator], SensorEn
     def __init__(self, coordinator: IptimeDataUpdateCoordinator, entry: ConfigEntry, key: str) -> None:
         super().__init__(coordinator)
         self._attr_unique_id = f"{DOMAIN}_{entry.entry_id}_{key}"
+
+
+class IptimeConnectedCountSensor(_IptimeBaseSensor):
+    _attr_name = "ipTIME 연결 기기 수"
+    _attr_native_unit_of_measurement = "대"
+    _attr_icon = "mdi:lan-connect"
+
+    def __init__(self, coordinator: IptimeDataUpdateCoordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator, entry, "connected_count")
+
+    @property
+    def native_value(self) -> int:
+        return len(self.coordinator.data.connected_clients)
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        return {
+            "devices": [
+                {
+                    "mac": client.mac,
+                    "hostname": client.hostname,
+                    "ip": client.ip,
+                    "interface": client.interface,
+                    "rssi_dbm": client.rssi,
+                }
+                for client in self.coordinator.data.connected_clients
+            ]
+        }
 
 
 class IptimeWirelessCountSensor(_IptimeBaseSensor):
