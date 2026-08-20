@@ -12,3 +12,4 @@ DEFAULT_CONSIDER_HOME = 180  # seconds a device stays "home" after it drops off 
 DEFAULT_RSSI_LIMIT = -90  # dBm; only applied to EasyMesh satellite stations
 
 SCAN_INTERVAL = 30  # seconds
+MAX_ATTRIBUTE_ITEMS = 100  # protect Recorder from unbounded state attributes

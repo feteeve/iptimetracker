@@ -28,6 +28,10 @@ class IptimeCaptchaRequired(UpdateFailed):
     """Raised when interactive CAPTCHA authentication is enabled."""
 
 
+class IptimeSessionExpired(UpdateFailed):
+    """Raised when an authenticated router page redirects to login."""
+
+
 @dataclass
 class WirelessClient:
     mac: str
@@ -63,7 +67,8 @@ class IptimeData:
 class IptimeClient:
     """HTTP client for the current, classic and mobile (IUX) ipTIME admin UIs."""
 
-    # Two known classic login handlers; some firmware only serves one of them.
+    # Known classic login handlers. The timepro form is required by a number of
+    # older firmwares and was the protocol used by the first integration build.
     LEGACY_LOGIN_PATHS = ("/sess-bin/login_handler.cgi", "/login/login.cgi")
     LEGACY_DATA_PATH = "/sess-bin/timepro.cgi"
     BETA_UI_PATH = "/ui/"
@@ -71,10 +76,18 @@ class IptimeClient:
     HOSTINFO_PATH = "/login/hostinfo2.cgi"
     MOBILE_LOGIN_PATH = "/m_handler.cgi"
     MOBILE_WLAN_PATHS = {
-        "2.4GHz": "/cgi/iux_get.cgi?tmenu=wirelessconf&smenu=macauth&act=status&wlmode=2g&bssidx=0",
-        "5GHz": "/cgi/iux_get.cgi?tmenu=wirelessconf&smenu=macauth&act=status&wlmode=5g&bssidx=65536",
+        "2.4GHz": (
+            "/cgi/iux_get.cgi?tmenu=wirelessconf&smenu=macauth"
+            "&act=status&wlmode=2g&bssidx=0"
+        ),
+        "5GHz": (
+            "/cgi/iux_get.cgi?tmenu=wirelessconf&smenu=macauth"
+            "&act=status&wlmode=5g&bssidx=65536"
+        ),
     }
-    MESH_LEGACY_PATH = "/sess-bin/timepro.cgi?tmenu=wirelessconf&smenu=easymesh"
+    MESH_LEGACY_PATH = (
+        "/sess-bin/timepro.cgi?tmenu=wirelessconf&smenu=easymesh"
+    )
     MESH_MOBILE_PATH = "/cgi/iux_get.cgi?tmenu=sysconf&smenu=info&act=status"
     MESH_STATION_PATH = "/easymesh/api.cgi?key=topology"
 
@@ -86,16 +99,24 @@ class IptimeClient:
     _TAG_PATTERN = re.compile(r"<[^>]+>")
 
     def __init__(self, host: str, username: str, password: str) -> None:
-        host = host.strip().rstrip("/")
-        if not urlsplit(host).scheme:
-            host = f"http://{host}"
-        self._base_url = host
+        self._base_url = self.normalize_host(host)
         self._username = username
         self._password = password
         self._session: aiohttp.ClientSession | None = None
         self._api_mode: str | None = None  # "beta" | "legacy" | "mobile"
         self._logged_in = False
         self._mesh_enabled = False
+
+    @staticmethod
+    def normalize_host(host: str) -> str:
+        """Return a stable router origin used by HTTP and config unique IDs."""
+        value = host.strip()
+        if not urlsplit(value).scheme:
+            value = f"http://{value}"
+        parsed = urlsplit(value)
+        if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+            raise ValueError("공유기 주소는 올바른 HTTP 또는 HTTPS 주소여야 합니다")
+        return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -151,7 +172,19 @@ class IptimeClient:
         except UpdateFailed as err:
             _LOGGER.debug("ipTIME 모바일 UI 확인 실패(%s): %s", self.HOSTINFO_PATH, err)
             return False
-        found = "iux" in text.lower()
+        lowered = text.lower()
+        # hostinfo2.cgi commonly returns JavaScript assignments, but some
+        # versions return JSON. Merely containing the word "iux" is not enough:
+        # disabled/uninstalled flags are also present on classic-only routers.
+        affirmative = re.search(
+            r"(?:iux(?:_package_installed)?)\s*[:=]\s*[\"']?"
+            r"(?:1|true|yes|on|installed)\b",
+            lowered,
+        )
+        explicit_disabled = re.search(
+            r"iux\s*[:=]\s*[\"']?(?:0|false|no|off|none)\b", lowered
+        )
+        found = bool(affirmative and not explicit_disabled)
         if not found:
             _LOGGER.debug("ipTIME 모바일(IUX) UI 미감지, 구형 UI로 진행")
         return found
@@ -167,18 +200,45 @@ class IptimeClient:
         self._logged_in = False
         self._mesh_enabled = False
 
+        candidates: list[tuple[str, Any]] = []
         if await self._supports_beta_ui():
-            self._api_mode = "beta"
-            await self._login_beta()
-            _LOGGER.info("ipTIME 로그인 성공: 신형(Beta) UI (%s)", self._base_url)
-        elif await self._supports_mobile_ui():
-            self._api_mode = "mobile"
-            await self._login_mobile()
-            _LOGGER.info("ipTIME 로그인 성공: 모바일(IUX) UI (%s)", self._base_url)
+            candidates.append(("beta", self._login_beta))
+        if await self._supports_mobile_ui():
+            candidates.append(("mobile", self._login_mobile))
+        # Always keep both classic protocols as fallbacks. UI feature probes
+        # are hints, not proof that the corresponding login endpoint works.
+        candidates.extend(
+            (("original", self._login_original), ("legacy", self._login_legacy))
+        )
+
+        auth_error: IptimeAuthenticationError | None = None
+        last_error: UpdateFailed | None = None
+        for mode, login_method in candidates:
+            self._api_mode = mode
+            self._logged_in = False
+            await self._clear_session_cookies()
+            try:
+                await login_method()
+                # A login cookie alone is not enough: some firmware exposes an
+                # endpoint but not the matching client-list API. Validate the
+                # complete mode before selecting it.
+                await self.get_wireless_clients()
+                _LOGGER.info("ipTIME 로그인 성공: %s UI (%s)", mode, self._base_url)
+                break
+            except IptimeCaptchaRequired:
+                raise
+            except IptimeAuthenticationError as err:
+                auth_error = err
+                _LOGGER.debug("ipTIME %s 로그인 인증 실패: %s", mode, err)
+            except UpdateFailed as err:
+                last_error = err
+                _LOGGER.debug("ipTIME %s 로그인 방식 실패: %s", mode, err)
         else:
-            self._api_mode = "legacy"
-            await self._login_legacy()
-            _LOGGER.info("ipTIME 로그인 성공: 구형 UI (%s)", self._base_url)
+            if auth_error:
+                raise auth_error
+            if last_error:
+                raise last_error
+            raise UpdateFailed("지원되는 ipTIME 로그인 방식을 찾지 못했습니다")
 
         self._mesh_enabled = await self._detect_mesh_enabled()
         if self._mesh_enabled:
@@ -187,7 +247,9 @@ class IptimeClient:
 
     async def _login_beta(self) -> bool:
         response, payload = await self._request_json(
-            "session/login", {"id": self._username, "pw": self._password}
+            "session/login",
+            {"id": self._username, "pw": self._password},
+            retry_on_auth=False,
         )
         self._logged_in = bool(payload.get("result"))
         if not self._logged_in:
@@ -205,6 +267,21 @@ class IptimeClient:
         if "efm_session_id" not in response.cookies and not stored_cookie:
             raise UpdateFailed("ipTIME 로그인 응답에 세션 쿠키가 없습니다")
         return True
+
+    async def _login_original(self) -> bool:
+        """Log in through the timepro form used by older ipTIME firmware."""
+        response, text = await self._request_text(
+            "POST",
+            self.LEGACY_DATA_PATH,
+            data={
+                "tmenu": "iframe",
+                "smenu": "login_proc",
+                "username": self._username,
+                "passwd": self._password,
+            },
+            allow_redirects=True,
+        )
+        return await self._accept_legacy_login_response(response, text)
 
     async def _login_legacy(self) -> bool:
         """Try each known classic login handler; firmware only serves one of them."""
@@ -236,27 +313,30 @@ class IptimeClient:
             data={"username": self._username, "passwd": self._password},
             allow_redirects=True,
         )
+        return await self._accept_legacy_login_response(response, text)
+
+    async def _accept_legacy_login_response(
+        self, response: aiohttp.ClientResponse, text: str
+    ) -> bool:
+        """Validate and retain a session from any classic login endpoint."""
         session_cookie = response.cookies.get("efm_session_id")
         session = await self._get_session()
         stored_cookie = session.cookie_jar.filter_cookies(response.url).get(
             "efm_session_id"
         )
         session_in_body = re.search(r"\b([A-Za-z0-9]{16})\b", text)
-        if "captcha" in text.lower() and "captcha_on" not in text.lower():
+        if self._captcha_required(text):
             raise IptimeCaptchaRequired("ipTIME 관리자 CAPTCHA 인증이 활성화되어 있습니다")
-        login_failed = (
-            "login_session.cgi?noauto=1" in text
-            or 'name="passwd"' in text
-            or "efm_pwchk" in text
-        )
-        if login_failed:
+        if self._is_login_page(text):
             raise IptimeAuthenticationError("ipTIME 관리자 계정이 올바르지 않습니다")
         self._logged_in = bool(session_cookie or stored_cookie or session_in_body)
         if self._logged_in and not session_cookie and not stored_cookie and session_in_body:
             session.cookie_jar.update_cookies(
                 {"efm_session_id": session_in_body.group(1)}, response.url
             )
-        return self._logged_in
+        if not self._logged_in:
+            raise UpdateFailed("ipTIME 로그인 응답에서 세션 값을 찾지 못했습니다")
+        return True
 
     async def _login_mobile(self) -> bool:
         response, text = await self._request_text(
@@ -269,6 +349,8 @@ class IptimeClient:
             "efm_session_id"
         )
         session_in_body = re.search(r"\b([A-Za-z0-9]{16})\b", text)
+        if self._captcha_required(text):
+            raise IptimeCaptchaRequired("ipTIME 관리자 CAPTCHA 인증이 활성화되어 있습니다")
         if not stored_cookie and session_in_body:
             session.cookie_jar.update_cookies(
                 {"efm_session_id": session_in_body.group(1)}, response.url
@@ -280,6 +362,10 @@ class IptimeClient:
                 "ipTIME(모바일) 로그인 응답에서 세션을 찾지 못했습니다. 계정을 확인하세요"
             )
         return True
+
+    async def _clear_session_cookies(self) -> None:
+        session = await self._get_session()
+        session.cookie_jar.clear()
 
     async def _request_json(
         self,
@@ -324,6 +410,8 @@ class IptimeClient:
             return await self._get_beta_clients()
         if self._api_mode == "mobile":
             return await self._get_mobile_clients()
+        if self._api_mode == "original":
+            return await self._get_original_clients()
         return await self._get_legacy_clients()
 
     async def _get_beta_clients(self) -> list[WirelessClient]:
@@ -333,7 +421,7 @@ class IptimeClient:
             error = payload.get("error") or {}
             if error.get("code") == -31998:
                 self._logged_in = False
-                raise UpdateFailed("ipTIME 세션 만료")
+                raise IptimeSessionExpired("ipTIME 세션이 만료되었습니다")
             raise UpdateFailed(f"ipTIME 접속자 조회 실패: {error}")
 
         clients: list[WirelessClient] = []
@@ -369,8 +457,14 @@ class IptimeClient:
         return [client for client in clients if client.mac]
 
     async def _get_mobile_clients(self) -> list[WirelessClient]:
+        return await self._get_mobile_clients_once(retry_on_auth=True)
+
+    async def _get_mobile_clients_once(
+        self, *, retry_on_auth: bool
+    ) -> list[WirelessClient]:
         clients: dict[str, WirelessClient] = {}
         successful_requests = 0
+        session_expired = False
         for interface, path in self.MOBILE_WLAN_PATHS.items():
             try:
                 _, text = await self._request_text("GET", path)
@@ -380,7 +474,15 @@ class IptimeClient:
             try:
                 payload = json.loads(text)
             except ValueError as err:
+                if self._is_login_page(text) or "m_handler.cgi" in text:
+                    session_expired = True
+                    continue
                 _LOGGER.debug("ipTIME(모바일) %s 응답 파싱 실패: %s", interface, err)
+                continue
+            if not isinstance(payload, dict):
+                continue
+            if self._mobile_payload_unauthorized(payload):
+                session_expired = True
                 continue
             successful_requests += 1
             for device in payload.get("stalist") or []:
@@ -394,11 +496,30 @@ class IptimeClient:
                     interface=interface,
                     rssi=self._as_int(device.get("rssi")),
                 )
-        # A router with zero connected devices is not a failure; only raise
-        # when every band request itself failed (matches _get_legacy_clients).
+        if session_expired:
+            self._logged_in = False
+            if retry_on_auth:
+                _LOGGER.info("ipTIME 모바일 세션 만료 감지, 재로그인 후 재조회")
+                await self._login_mobile()
+                return await self._get_mobile_clients_once(retry_on_auth=False)
+            raise IptimeSessionExpired("ipTIME 모바일 세션이 만료되었습니다")
         if not successful_requests:
             raise UpdateFailed("ipTIME(모바일) 무선 접속자 페이지를 조회할 수 없습니다")
         return list(clients.values())
+
+    @classmethod
+    def _mobile_payload_unauthorized(cls, payload: dict[str, Any]) -> bool:
+        text = json.dumps(payload, ensure_ascii=False).lower()
+        return any(
+            marker in text
+            for marker in (
+                "login_session",
+                "session expired",
+                "session_expired",
+                "invalid session",
+                "not logged",
+            )
+        )
 
     async def _detect_mesh_enabled(self) -> bool:
         """Whether this router has EasyMesh active (a topology query is only useful then)."""
@@ -469,17 +590,46 @@ class IptimeClient:
                 )
                 if self._is_login_page(page):
                     self._logged_in = False
-                    raise UpdateFailed("ipTIME 세션 만료")
+                    raise IptimeSessionExpired("ipTIME 세션이 만료되었습니다")
                 successful_requests += 1
                 for client in self._parse_wireless(page, interface):
                     clients[client.mac] = client
             except UpdateFailed as err:
-                if "세션 만료" in str(err):
+                if isinstance(err, IptimeSessionExpired):
                     raise
                 _LOGGER.debug("ipTIME %s 조회 실패: %s", interface, err)
 
         if not successful_requests:
             raise UpdateFailed("ipTIME 무선 접속자 페이지를 조회할 수 없습니다")
+        return list(clients.values())
+
+    async def _get_original_clients(self) -> list[WirelessClient]:
+        """Query the POST menus used by older timepro-based firmware."""
+        clients: dict[str, WirelessClient] = {}
+        successful_requests = 0
+        for menu, interface in (
+            ("wireless_association", "2.4GHz"),
+            ("wireless_association_5g", "5GHz"),
+            ("wireless_association_6g", "6GHz"),
+            ("lan_pcinfo_status", "LAN/unknown"),
+        ):
+            try:
+                _, page = await self._request_text(
+                    "POST",
+                    self.LEGACY_DATA_PATH,
+                    data={"tmenu": "iframe", "smenu": menu},
+                )
+            except UpdateFailed as err:
+                _LOGGER.debug("ipTIME 원본 메뉴 %s 조회 실패: %s", menu, err)
+                continue
+            if self._is_login_page(page):
+                self._logged_in = False
+                raise IptimeSessionExpired("ipTIME 세션이 만료되었습니다")
+            successful_requests += 1
+            for client in self._parse_wireless(page, interface):
+                clients[client.mac] = client
+        if not successful_requests:
+            raise UpdateFailed("ipTIME 원본 접속자 페이지를 조회할 수 없습니다")
         return list(clients.values())
 
     def _parse_wireless(self, page: str, interface: str) -> list[WirelessClient]:
@@ -493,14 +643,7 @@ class IptimeClient:
                 self._clean_cell(match.group(1))
                 for match in self._CELL_PATTERN.finditer(row_text)
             ]
-            ip = next(
-                (
-                    match.group()
-                    for cell in cells
-                    if (match := self._IP_PATTERN.search(cell))
-                ),
-                "",
-            )
+            ip = next((valid for cell in cells if (valid := self._valid_ip(cell))), "")
             rssi_match = self._RSSI_PATTERN.search(" ".join(cells))
             hostname = next(
                 (
@@ -527,25 +670,36 @@ class IptimeClient:
         return clients
 
     async def get_dhcp_leases(self) -> list[DhcpLease]:
-        try:
-            _, page = await self._request_text(
+        for method, request_data in (
+            (
                 "GET",
-                self.LEGACY_DATA_PATH,
-                params={"tmenu": "iframe", "smenu": "lan_pcinfo_status"},
-            )
-        except UpdateFailed:
-            return []
-        if self._is_login_page(page):
-            return []
-        return self._parse_dhcp_leases(page)
+                {"params": {"tmenu": "iframe", "smenu": "lan_pcinfo_status"}},
+            ),
+            (
+                "POST",
+                {"data": {"tmenu": "iframe", "smenu": "lan_pcinfo_status"}},
+            ),
+        ):
+            try:
+                _, page = await self._request_text(
+                    method, self.LEGACY_DATA_PATH, **request_data
+                )
+            except UpdateFailed:
+                continue
+            if self._is_login_page(page):
+                self._logged_in = False
+                raise IptimeSessionExpired("ipTIME DHCP 조회 중 세션이 만료되었습니다")
+            if leases := self._parse_dhcp_leases(page):
+                return leases
+        return []
 
     def _parse_dhcp_leases(self, page: str) -> list[DhcpLease]:
         leases: list[DhcpLease] = []
         for row in self._ROW_PATTERN.finditer(page):
             row_text = row.group()
             mac_match = self._MAC_PATTERN.search(row_text)
-            ip_match = self._IP_PATTERN.search(row_text)
-            if not mac_match or not ip_match:
+            ip = self._valid_ip(row_text)
+            if not mac_match or not ip:
                 continue
             cells = [
                 self._clean_cell(match.group(1))
@@ -562,10 +716,34 @@ class IptimeClient:
                 ),
                 mac,
             )
-            leases.append(DhcpLease(mac=mac, ip=ip_match.group(1), hostname=hostname))
+            leases.append(DhcpLease(mac=mac, ip=ip, hostname=hostname))
         return leases
 
     async def get_static_leases(self) -> list[StaticLease]:
+        # Menu names differ between firmware generations. An unsupported menu
+        # is harmless; only return once a page contains parseable mappings.
+        for menu in ("lan_dhcp_static", "lan_dhcp_staticlist", "lan_dhcp_manual"):
+            try:
+                _, page = await self._request_text(
+                    "GET",
+                    self.LEGACY_DATA_PATH,
+                    params={"tmenu": "iframe", "smenu": menu},
+                )
+            except UpdateFailed:
+                continue
+            if self._is_login_page(page):
+                self._logged_in = False
+                raise IptimeSessionExpired(
+                    "ipTIME 고정 DHCP 조회 중 세션이 만료되었습니다"
+                )
+            if "static" not in page.lower() and "고정" not in page:
+                continue
+            leases = [
+                StaticLease(mac=item.mac, ip=item.ip, hostname=item.hostname)
+                for item in self._parse_dhcp_leases(page)
+            ]
+            if leases:
+                return leases
         return []
 
     async def fetch_all(self, rssi_limit: int = DEFAULT_RSSI_LIMIT) -> IptimeData:
@@ -574,14 +752,24 @@ class IptimeClient:
 
         try:
             wireless = await self.get_wireless_clients()
-        except UpdateFailed as err:
-            if "세션 만료" not in str(err):
-                raise
+        except IptimeSessionExpired:
             _LOGGER.info("ipTIME 세션 만료 감지, 재로그인 후 재조회합니다")
             await self.login()  # raises with the specific reason if this fails too
             wireless = await self.get_wireless_clients()
 
-        dhcp = await self.get_dhcp_leases() if self._api_mode == "legacy" else []
+        # timepro's client page is also available in many mobile/classic builds
+        # and fills in wired devices that the mobile WLAN API does not expose.
+        dhcp = []
+        static = []
+        if self._api_mode in {"mobile", "legacy", "original"}:
+            try:
+                dhcp = await self.get_dhcp_leases()
+                static = await self.get_static_leases()
+            except IptimeSessionExpired:
+                _LOGGER.info("ipTIME 보조 목록 조회 중 세션 만료, 재로그인 후 재조회")
+                await self.login()
+                dhcp = await self.get_dhcp_leases()
+                static = await self.get_static_leases()
         mesh = await self.get_mesh_clients(rssi_limit) if self._mesh_enabled else []
         connected = {client.mac: client for client in wireless}
         # The classic UI exposes wired clients through lan_pcinfo_status and
@@ -617,6 +805,7 @@ class IptimeClient:
             connected_clients=connected_clients,
             wireless_clients=wireless_clients,
             dhcp_leases=dhcp,
+            static_leases=static,
         )
 
     @classmethod
@@ -628,6 +817,16 @@ class IptimeClient:
         match = cls._MAC_PATTERN.search(value)
         return match.group(1).upper().replace("-", ":") if match else ""
 
+    @classmethod
+    def _valid_ip(cls, value: str) -> str:
+        match = cls._IP_PATTERN.search(value)
+        if not match:
+            return ""
+        candidate = match.group(1)
+        return (
+            candidate if all(int(part) <= 255 for part in candidate.split(".")) else ""
+        )
+
     @staticmethod
     def _as_int(value: Any) -> int | None:
         try:
@@ -637,10 +836,23 @@ class IptimeClient:
 
     @staticmethod
     def _is_login_page(page: str) -> bool:
+        page = page.lower()
         return (
             'name="passwd"' in page
             or "login_session.cgi?noauto=1" in page
             or "efm_pwchk" in page
+        )
+
+    @staticmethod
+    def _captcha_required(page: str) -> bool:
+        lowered = page.lower()
+        if re.search(
+            r"captcha(?:_on)?\s*[:=]\s*[\"']?(?:0|false|off)\b", lowered
+        ):
+            return False
+        return bool(
+            re.search(r'name=[\"\'](?:captcha|captcha_code)[\"\']', lowered)
+            or "captcha_required" in lowered
         )
 
 

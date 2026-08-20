@@ -23,7 +23,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     coordinator = IptimeDataUpdateCoordinator(hass, client, entry)
 
-    await coordinator.async_config_entry_first_refresh()
+    try:
+        await coordinator.async_config_entry_first_refresh()
+    except Exception:
+        await client.close()
+        raise
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
 
@@ -31,6 +35,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
 
+    return True
+
+
+async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Normalize router addresses and unique IDs from pre-1.3 releases."""
+    if entry.version >= 2:
+        return True
+    try:
+        normalized_host = IptimeClient.normalize_host(entry.data[CONF_HOST])
+    except (KeyError, TypeError, ValueError):
+        _LOGGER.error("Cannot migrate ipTIME entry %s: invalid host", entry.entry_id)
+        return False
+    hass.config_entries.async_update_entry(
+        entry,
+        data={**entry.data, CONF_HOST: normalized_host},
+        unique_id=normalized_host,
+        version=2,
+    )
+    _LOGGER.info("Migrated ipTIME entry %s to normalized host", entry.entry_id)
     return True
 
 

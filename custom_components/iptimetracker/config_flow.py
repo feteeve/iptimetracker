@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
 from urllib.parse import urlsplit
 
 import voluptuous as vol
@@ -10,9 +9,9 @@ from homeassistant.config_entries import ConfigEntry, ConfigFlow, ConfigFlowResu
 from homeassistant.core import callback
 
 try:
-    from homeassistant.components.ssdp import SsdpServiceInfo
+    from homeassistant.helpers.service_info.ssdp import SsdpServiceInfo
 except ImportError:  # pragma: no cover - depends on the HA version installed
-    SsdpServiceInfo = Any  # type: ignore[assignment,misc]
+    from homeassistant.components.ssdp import SsdpServiceInfo
 
 from .const import (
     CONF_CONSIDER_HOME,
@@ -35,6 +34,9 @@ from .coordinator import (
 
 _LOGGER = logging.getLogger(__name__)
 
+CONSIDER_HOME_VALIDATOR = vol.All(vol.Coerce(int), vol.Range(min=0, max=86400))
+RSSI_VALIDATOR = vol.All(vol.Coerce(int), vol.Range(min=-120, max=0))
+
 
 def _user_schema(*, default_host: str) -> vol.Schema:
     return vol.Schema(
@@ -42,14 +44,18 @@ def _user_schema(*, default_host: str) -> vol.Schema:
             vol.Required(CONF_HOST, default=default_host): str,
             vol.Required(CONF_USERNAME, default=DEFAULT_USERNAME): str,
             vol.Required(CONF_PASSWORD): str,
-            vol.Optional(CONF_CONSIDER_HOME, default=DEFAULT_CONSIDER_HOME): int,
-            vol.Optional(CONF_RSSI_LIMIT, default=DEFAULT_RSSI_LIMIT): int,
+            vol.Optional(
+                CONF_CONSIDER_HOME, default=DEFAULT_CONSIDER_HOME
+            ): CONSIDER_HOME_VALIDATOR,
+            vol.Optional(
+                CONF_RSSI_LIMIT, default=DEFAULT_RSSI_LIMIT
+            ): RSSI_VALIDATOR,
         }
     )
 
 
 class IptimeTrackerConfigFlow(ConfigFlow, domain=DOMAIN):
-    VERSION = 1
+    VERSION = 2
 
     def __init__(self) -> None:
         self._discovered_host: str | None = None
@@ -66,8 +72,14 @@ class IptimeTrackerConfigFlow(ConfigFlow, domain=DOMAIN):
         if not url:
             return self.async_abort(reason="cannot_connect")
 
-        host = urlsplit(url).netloc or url
-        await self.async_set_unique_id(host)
+        try:
+            normalized = IptimeClient.normalize_host(url)
+        except ValueError:
+            return self.async_abort(reason="cannot_connect")
+        host = urlsplit(normalized).netloc
+        if self._host_already_configured(normalized):
+            return self.async_abort(reason="already_configured")
+        await self.async_set_unique_id(normalized)
         self._abort_if_unique_id_configured()
         self._discovered_host = host
         return await self.async_step_user()
@@ -79,8 +91,31 @@ class IptimeTrackerConfigFlow(ConfigFlow, domain=DOMAIN):
         error_detail = ""
 
         if user_input is not None:
-            await self.async_set_unique_id(user_input[CONF_HOST])
-            self._abort_if_unique_id_configured()
+            try:
+                normalized_host = IptimeClient.normalize_host(user_input[CONF_HOST])
+            except ValueError as err:
+                errors["base"] = "cannot_connect"
+                error_detail = str(err)
+                normalized_host = ""
+
+            if normalized_host:
+                if self._host_already_configured(normalized_host):
+                    return self.async_abort(reason="already_configured")
+                user_input = {**user_input, CONF_HOST: normalized_host}
+                await self.async_set_unique_id(normalized_host)
+                self._abort_if_unique_id_configured()
+
+            if not normalized_host:
+                return self.async_show_form(
+                    step_id="user",
+                    data_schema=_user_schema(
+                        default_host=self._discovered_host or DEFAULT_HOST
+                    ),
+                    errors=errors,
+                    description_placeholders={
+                        "error_detail": self._error_detail(error_detail)
+                    },
+                )
 
             client = IptimeClient(
                 host=user_input[CONF_HOST],
@@ -89,7 +124,6 @@ class IptimeTrackerConfigFlow(ConfigFlow, domain=DOMAIN):
             )
             try:
                 await client.login()
-                await client.close()
                 return self.async_create_entry(
                     title=f"ipTIME ({user_input[CONF_HOST]})",
                     data=user_input,
@@ -118,9 +152,27 @@ class IptimeTrackerConfigFlow(ConfigFlow, domain=DOMAIN):
             # Always show the router's own failure reason, not just the
             # generic error key, so a bad setup can be diagnosed on the spot.
             description_placeholders={
-                "error_detail": f"\n\n오류 상세: {error_detail}" if error_detail else ""
+                "error_detail": self._error_detail(error_detail)
             },
         )
+
+    def _error_detail(self, detail: str) -> str:
+        if not detail:
+            return ""
+        language = getattr(self.hass.config, "language", "en")
+        prefix = "오류 상세" if language.lower().startswith("ko") else "Error details"
+        return f"\n\n{prefix}: {detail}"
+
+    def _host_already_configured(self, normalized_host: str) -> bool:
+        """Detect entries created before host normalization was introduced."""
+        for entry in self._async_current_entries():
+            try:
+                configured_host = IptimeClient.normalize_host(entry.data[CONF_HOST])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if configured_host == normalized_host:
+                return True
+        return False
 
     @staticmethod
     @callback
@@ -132,21 +184,23 @@ class IptimeTrackerOptionsFlow(OptionsFlow):
     """Let the user tune presence-detection behavior after setup."""
 
     def __init__(self, config_entry: ConfigEntry) -> None:
-        self._config_entry = config_entry
+        # Keep compatibility with HA releases predating OptionsFlow.config_entry.
+        self._provided_config_entry = config_entry
 
     async def async_step_init(
-        self, user_input: dict[str, Any] | None = None
+        self, user_input: dict[str, object] | None = None
     ) -> ConfigFlowResult:
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)
 
-        current_consider_home = self._config_entry.options.get(
+        config_entry = getattr(self, "config_entry", self._provided_config_entry)
+        current_consider_home = config_entry.options.get(
             CONF_CONSIDER_HOME,
-            self._config_entry.data.get(CONF_CONSIDER_HOME, DEFAULT_CONSIDER_HOME),
+            config_entry.data.get(CONF_CONSIDER_HOME, DEFAULT_CONSIDER_HOME),
         )
-        current_rssi_limit = self._config_entry.options.get(
+        current_rssi_limit = config_entry.options.get(
             CONF_RSSI_LIMIT,
-            self._config_entry.data.get(CONF_RSSI_LIMIT, DEFAULT_RSSI_LIMIT),
+            config_entry.data.get(CONF_RSSI_LIMIT, DEFAULT_RSSI_LIMIT),
         )
         return self.async_show_form(
             step_id="init",
@@ -154,8 +208,10 @@ class IptimeTrackerOptionsFlow(OptionsFlow):
                 {
                     vol.Optional(
                         CONF_CONSIDER_HOME, default=current_consider_home
-                    ): int,
-                    vol.Optional(CONF_RSSI_LIMIT, default=current_rssi_limit): int,
+                    ): CONSIDER_HOME_VALIDATOR,
+                    vol.Optional(
+                        CONF_RSSI_LIMIT, default=current_rssi_limit
+                    ): RSSI_VALIDATOR,
                 }
             ),
         )
