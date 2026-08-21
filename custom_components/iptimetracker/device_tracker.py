@@ -14,7 +14,7 @@ from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
-from .const import CONF_CONSIDER_HOME, DEFAULT_CONSIDER_HOME, DOMAIN
+from .const import CONF_CONSIDER_HOME, CONF_TRACKED_MACS, DEFAULT_CONSIDER_HOME, DOMAIN
 from .coordinator import IptimeDataUpdateCoordinator, WirelessClient
 
 _LOGGER = logging.getLogger(__name__)
@@ -50,6 +50,17 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     coordinator: IptimeDataUpdateCoordinator = hass.data[DOMAIN][entry.entry_id]
+
+    # None means the user has never visited the device-picker options step
+    # yet, so fall back to the old "track everything" behavior rather than
+    # silently dropping every entity on upgrade. An explicit (possibly
+    # empty) list means the picker is now the source of truth.
+    tracked_macs_option = entry.options.get(CONF_TRACKED_MACS)
+    allowed_macs: set[str] | None = (
+        {mac.upper() for mac in tracked_macs_option}
+        if tracked_macs_option is not None
+        else None
+    )
 
     store: Store[dict[str, object]] = Store(
         hass, _STORE_VERSION, f"{DOMAIN}.{entry.entry_id}.known_devices"
@@ -98,13 +109,29 @@ async def async_setup_entry(
             mac,
         )
 
+    # Devices the user unchecked in the options device picker: drop them the
+    # same way as a stale device (remove from tracking + entity registry)
+    # rather than leaving an orphaned, unmanaged entity behind.
+    unselected_macs: set[str] = set()
+    if allowed_macs is not None:
+        unselected_macs = {mac for mac in tracked if mac not in allowed_macs}
+        tracked -= unselected_macs
+        for mac in unselected_macs:
+            last_seen_map.pop(mac, None)
+        # Create an entity for every picked device right away, even one
+        # that's offline right now (e.g. a named static-IP reservation that
+        # hasn't connected yet) - otherwise it would only appear the first
+        # time it happens to show up in a live poll.
+        tracked |= allowed_macs
+    macs_to_remove = stale_macs | unselected_macs
+
     for registry_entry in er.async_entries_for_config_entry(registry, entry.entry_id):
         if registry_entry.domain != "device_tracker" or registry_entry.platform != DOMAIN:
             continue
         mac = _mac_from_unique_id(registry_entry.unique_id)
         if not mac:
             continue
-        if mac in stale_macs:
+        if mac in macs_to_remove:
             registry.async_remove(registry_entry.entity_id)
             continue
         expected_unique_id = _unique_id(entry, mac)
@@ -123,6 +150,8 @@ async def async_setup_entry(
         changed = False
         now = dt_util.utcnow()
         for client in coordinator.data.connected_clients:
+            if allowed_macs is not None and client.mac not in allowed_macs:
+                continue
             if client.mac not in tracked:
                 tracked.add(client.mac)
                 last_seen_map[client.mac] = now.isoformat()

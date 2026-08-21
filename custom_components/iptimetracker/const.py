@@ -6,6 +6,7 @@ CONF_PASSWORD = "password"
 CONF_CONSIDER_HOME = "consider_home"
 CONF_RSSI_LIMIT = "rssi_limit"
 CONF_SCAN_INTERVAL = "scan_interval"
+CONF_TRACKED_MACS = "tracked_macs"
 
 DEFAULT_HOST = "192.168.0.1"
 DEFAULT_USERNAME = "admin"

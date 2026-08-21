@@ -7,6 +7,7 @@ import voluptuous as vol
 
 from homeassistant.config_entries import ConfigEntry, ConfigFlow, ConfigFlowResult, OptionsFlow
 from homeassistant.core import callback
+from homeassistant.helpers import config_validation as cv
 
 try:
     from homeassistant.helpers.service_info.ssdp import SsdpServiceInfo
@@ -19,6 +20,7 @@ from .const import (
     CONF_PASSWORD,
     CONF_RSSI_LIMIT,
     CONF_SCAN_INTERVAL,
+    CONF_TRACKED_MACS,
     CONF_USERNAME,
     DEFAULT_CONSIDER_HOME,
     DEFAULT_HOST,
@@ -192,12 +194,14 @@ class IptimeTrackerOptionsFlow(OptionsFlow):
     def __init__(self, config_entry: ConfigEntry) -> None:
         # Keep compatibility with HA releases predating OptionsFlow.config_entry.
         self._provided_config_entry = config_entry
+        self._pending_options: dict[str, object] = {}
 
     async def async_step_init(
         self, user_input: dict[str, object] | None = None
     ) -> ConfigFlowResult:
         if user_input is not None:
-            return self.async_create_entry(title="", data=user_input)
+            self._pending_options = user_input
+            return await self.async_step_devices()
 
         config_entry = getattr(self, "config_entry", self._provided_config_entry)
         current_scan_interval = config_entry.options.get(
@@ -228,3 +232,62 @@ class IptimeTrackerOptionsFlow(OptionsFlow):
                 }
             ),
         )
+
+    async def async_step_devices(
+        self, user_input: dict[str, object] | None = None
+    ) -> ConfigFlowResult:
+        """Pick which routed devices get a device_tracker entity.
+
+        Built from what the router actually reports right now (connected
+        clients and named static-IP reservations) instead of asking the user
+        to type MAC addresses blind, so they can recognize devices by name/IP
+        the same way the router's own admin page shows them.
+        """
+        config_entry = getattr(self, "config_entry", self._provided_config_entry)
+
+        if user_input is not None:
+            data = {
+                **self._pending_options,
+                CONF_TRACKED_MACS: user_input[CONF_TRACKED_MACS],
+            }
+            return self.async_create_entry(title="", data=data)
+
+        currently_tracked = set(config_entry.options.get(CONF_TRACKED_MACS, []))
+        choices = self._device_choices(config_entry, currently_tracked)
+
+        return self.async_show_form(
+            step_id="devices",
+            data_schema=vol.Schema(
+                {
+                    vol.Optional(
+                        CONF_TRACKED_MACS,
+                        default=[mac for mac in currently_tracked if mac in choices],
+                    ): cv.multi_select(choices)
+                }
+            ),
+        )
+
+    def _device_choices(
+        self, config_entry: ConfigEntry, currently_tracked: set[str]
+    ) -> dict[str, str]:
+        coordinator = self.hass.data.get(DOMAIN, {}).get(config_entry.entry_id)
+        data = coordinator.data if coordinator else None
+        choices: dict[str, str] = {}
+        if data:
+            for client in data.connected_clients:
+                if not client.mac:
+                    continue
+                label = client.hostname or client.mac
+                detail = f"{label} ({client.ip or '?'}, {client.mac}) - 접속중"
+                choices[client.mac] = detail
+            for lease in data.static_leases:
+                if not lease.mac or lease.mac in choices:
+                    continue
+                label = lease.hostname or lease.mac
+                choices[lease.mac] = f"{label} ({lease.ip or '?'}, {lease.mac}) - 고정IP"
+        # A device selected earlier that's now offline and has no static
+        # lease would otherwise vanish from the choices entirely, silently
+        # dropping it from cv.multi_select's default when the form re-renders.
+        for mac in currently_tracked:
+            choices.setdefault(mac, f"{mac} - 오프라인")
+        return choices

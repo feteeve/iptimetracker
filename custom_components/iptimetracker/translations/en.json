@@ -44,6 +44,13 @@
           "consider_home": "Keeps a device marked 'home' for this many seconds after it drops off the client list.",
           "rssi_limit": "Only applies to EasyMesh satellite stations. A weaker signal than this is treated as not home."
         }
+      },
+      "devices": {
+        "title": "Choose devices to track",
+        "description": "Devices currently connected to the router, or named static-IP reservations. Only selected devices get a device_tracker entity; unchecking a previously selected device removes its entity too.",
+        "data": {
+          "tracked_macs": "Devices to track"
+        }
       }
     }
   }
