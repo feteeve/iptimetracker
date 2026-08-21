@@ -372,11 +372,68 @@ class IptimeClient:
             "efm_session_id"
         )
         session_in_body = re.search(r"\b([A-Za-z0-9]{16})\b", text)
-        if self._captcha_required(text):
+        is_login_page = self._is_login_page(text)
+        captcha_required = self._captcha_required(text)
+        logged_in = bool(session_cookie or stored_cookie or session_in_body)
+
+        # Temporary diagnostic: capture everything needed to pin down a login
+        # failure in one shot instead of another deploy-and-check round trip.
+        # Covers both "session marker missing" (cookie name/scope/body-format
+        # differs on this firmware) and "wrong credentials misclassified as
+        # a connection failure" (is_login_page()/_captcha_required() rely on
+        # fixed patterns from known firmware and may not match this one).
+        if not logged_in or is_login_page or captcha_required:
+            credential_failure_hints = [
+                phrase
+                for phrase in (
+                    "wrong", "invalid", "incorrect", "실패", "틀렸", "일치하지",
+                    "잘못", "fail", "denied", "error",
+                )
+                if phrase in text.lower()
+            ]
+            session_keyword_hits = re.findall(
+                r"(?:sess|token|sid|efm)[a-z_]*\s*[:=]\s*[\"']?([\w-]{6,64})",
+                text,
+                re.IGNORECASE,
+            )
+            _LOGGER.debug(
+                "ipTIME 로그인 진단: status=%s final_url=%s\n"
+                "  classifier 판정: is_login_page=%s captcha_required=%s marker_found=%s\n"
+                "  본문 내 실패 의심 키워드=%s (ID/PW가 맞는데도 이게 뜨면 classifier 오탐지 의심)\n"
+                "  이 응답 Set-Cookie=%s\n"
+                "  리다이렉트 이력=%s\n"
+                "  쿠키 저장소=%s\n"
+                "  session/token/sid/efm 키워드 주변 후보값(최대 10개)=%s\n"
+                "  본문 길이=%d, 본문 앞부분=%r",
+                response.status,
+                response.url,
+                is_login_page,
+                captcha_required,
+                logged_in,
+                credential_failure_hints,
+                response.headers.getall("Set-Cookie", []),
+                [
+                    {
+                        "status": hop.status,
+                        "url": str(hop.url),
+                        "set_cookie": hop.headers.getall("Set-Cookie", []),
+                    }
+                    for hop in response.history
+                ],
+                [
+                    f"{morsel.key}={morsel.value} (domain={morsel['domain']!r}, path={morsel['path']!r})"
+                    for morsel in session.cookie_jar
+                ],
+                session_keyword_hits[:10],
+                len(text),
+                text[:500],
+            )
+
+        if captcha_required:
             raise IptimeCaptchaRequired("ipTIME 관리자 CAPTCHA 인증이 활성화되어 있습니다")
-        if self._is_login_page(text):
+        if is_login_page:
             raise IptimeAuthenticationError("ipTIME 관리자 계정이 올바르지 않습니다")
-        self._logged_in = bool(session_cookie or stored_cookie or session_in_body)
+        self._logged_in = logged_in
         if self._logged_in and not session_cookie and not stored_cookie and session_in_body:
             session.cookie_jar.update_cookies(
                 {"efm_session_id": session_in_body.group(1)}, response.url
