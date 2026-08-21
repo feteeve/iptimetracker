@@ -143,8 +143,22 @@ class IptimeClient:
                 # intentionally rejects cookies from IP hosts.
                 cookie_jar=aiohttp.CookieJar(unsafe=True),
                 headers={
-                    "User-Agent": "Mozilla/5.0 (Home Assistant ipTIME Tracker)",
+                    # The beta/Flutter admin UI's /cgi/service.cgi enforces an
+                    # Origin/Referer check on its API and silently drops (no
+                    # response at all, not even an error) requests that don't
+                    # look like they came from its own page - confirmed by
+                    # comparing against the community iptime_manager project,
+                    # which sends a real browser User-Agent plus Origin/Referer
+                    # on this exact endpoint. Without them, login just hangs
+                    # until timeout instead of failing fast.
+                    "User-Agent": (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                    ),
+                    "Accept": "application/json, text/plain, */*",
                     "Accept-Language": "ko-KR,ko;q=0.9,en;q=0.8",
+                    "Origin": self._base_url,
+                    "Referer": f"{self._base_url}/",
                 },
             )
         return self._session
