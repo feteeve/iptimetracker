@@ -387,10 +387,21 @@ class IptimeClient:
         try:
             _, payload = await self._request_json(self.WAN_LINK_METHOD, retry_on_auth=False)
         except UpdateFailed as err:
+            # Temporary diagnostic: this call intentionally doesn't retry on
+            # auth failure (to avoid a recursive re-login loop from an
+            # ancillary status check), so an intermittent session hiccup
+            # here shows up as the entity going "unavailable" for a poll
+            # cycle. Logging the payload/error pins down whether that's what
+            # is actually happening versus something else.
             _LOGGER.debug("ipTIME WAN 링크 상태 조회 실패: %s", err)
             return None
         result = payload.get("result")
         if not isinstance(result, list):
+            _LOGGER.debug(
+                "ipTIME WAN 링크 상태 응답 형식 이상: result=%r 전체 payload=%r",
+                result,
+                payload,
+            )
             return None
         wan_port = next(
             (
@@ -400,9 +411,16 @@ class IptimeClient:
             None,
         )
         if wan_port is None:
+            _LOGGER.debug(
+                "ipTIME WAN 링크 상태 응답에 WAN 타입 포트 없음: 받은 포트 목록=%r",
+                result,
+            )
             return None
         link = wan_port.get("link")
         if link in (None, "", "null"):
+            _LOGGER.debug(
+                "ipTIME WAN 링크 끊김으로 보고됨, 해당 포트 원본 데이터=%r", wan_port
+            )
             return WanLinkStatus(connected=False)
         match = self._LINK_SPEED_PATTERN.match(str(link))
         if not match:
