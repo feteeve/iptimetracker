@@ -7,15 +7,7 @@
         "data": {
           "host": "Router address",
           "username": "Administrator username",
-          "password": "Administrator password",
-          "scan_interval": "Scan interval (seconds)",
-          "consider_home": "Away detection delay (seconds)",
-          "rssi_limit": "Mesh device RSSI threshold (dBm)"
-        },
-        "data_description": {
-          "scan_interval": "How often the router's connected-device list is re-fetched (10-3600 seconds).",
-          "consider_home": "Keeps a device marked 'home' for this many seconds after it drops off the client list, to avoid flapping caused by Wi-Fi power save.",
-          "rssi_limit": "Only applies to EasyMesh satellite stations. A weaker signal than this is treated as not home."
+          "password": "Administrator password"
         }
       }
     },
@@ -33,19 +25,6 @@
   "options": {
     "step": {
       "init": {
-        "title": "ipTIME Tracker Options",
-        "data": {
-          "scan_interval": "Scan interval (seconds)",
-          "consider_home": "Away detection delay (seconds)",
-          "rssi_limit": "Mesh device RSSI threshold (dBm)"
-        },
-        "data_description": {
-          "scan_interval": "How often the router's connected-device list is re-fetched (10-3600 seconds).",
-          "consider_home": "Keeps a device marked 'home' for this many seconds after it drops off the client list.",
-          "rssi_limit": "Only applies to EasyMesh satellite stations. A weaker signal than this is treated as not home."
-        }
-      },
-      "devices": {
         "title": "Choose devices to track",
         "description": "Devices currently connected to the router, or named static-IP reservations. Only selected devices get a device_tracker entity; unchecking a previously selected device removes its entity too.",
         "data": {

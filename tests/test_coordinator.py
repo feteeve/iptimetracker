@@ -84,6 +84,53 @@ class IptimeClientHelperTest(unittest.TestCase):
         self.assertEqual(parsed[0].ip, "")
         self.assertEqual(parsed[0].mac, "AA:BB:CC:DD:EE:FF")
 
+    def test_classic_lan_layout_uses_hostname_not_assignment_column(self) -> None:
+        client = coordinator.IptimeClient.__new__(coordinator.IptimeClient)
+        page = """
+        <tr class="lansetup_main_tr">
+          <td><span>192.168.0.12</span></td>
+          <td><span>AA:BB:CC:DD:EE:FF</span></td>
+          <td><span>my-phone</span></td>
+          <td><span>무선 : 수동할당</span></td>
+        </tr>
+        """
+        parsed = client._parse_wireless(page, "LAN/unknown")
+        self.assertEqual(parsed[0].hostname, "my-phone")
+
+    def test_address_parser_uses_reordered_headers(self) -> None:
+        client = coordinator.IptimeClient.__new__(coordinator.IptimeClient)
+        page = """
+        <table>
+          <tr><th>장치 이름</th><th>MAC 주소</th><th>할당 방식</th><th>IP 주소</th></tr>
+          <tr><td>living-room-tv</td><td>AA-BB-CC-DD-EE-FF</td>
+              <td>Static</td><td>192.168.0.30</td></tr>
+        </table>
+        """
+        self.assertEqual(
+            client._parse_address_rows(page),
+            [
+                (
+                    "AA:BB:CC:DD:EE:FF",
+                    "192.168.0.30",
+                    "living-room-tv",
+                    "Static",
+                )
+            ],
+        )
+
+    def test_assignment_text_is_not_accepted_as_a_name(self) -> None:
+        client = coordinator.IptimeClient.__new__(coordinator.IptimeClient)
+        self.assertEqual(client._clean_name("무선 : 수동할당", "AA:BB:CC:DD:EE:FF"), "")
+
+    def test_name_alias_fields_are_supported(self) -> None:
+        client = coordinator.IptimeClient.__new__(coordinator.IptimeClient)
+        self.assertEqual(
+            client._name_from_mappings(
+                "AA:BB:CC:DD:EE:FF", {"nickname": "거실 스피커"}
+            ),
+            "거실 스피커",
+        )
+
     def test_mobile_unauthorized_payload_detection(self) -> None:
         self.assertTrue(
             coordinator.IptimeClient._mobile_payload_unauthorized(
@@ -133,7 +180,11 @@ class IptimeClientAsyncTest(unittest.IsolatedAsyncioTestCase):
         client._login_original = AsyncMock(return_value=True)
         client._login_legacy = AsyncMock(return_value=True)
         client.get_wireless_clients = AsyncMock(
-            side_effect=[coordinator.UpdateFailed("unsupported"), []]
+            side_effect=[
+                coordinator.UpdateFailed("unsupported"),
+                coordinator.UpdateFailed("still unsupported"),
+                [],
+            ]
         )
         client._detect_mesh_enabled = AsyncMock(return_value=False)
 
@@ -158,6 +209,77 @@ class IptimeClientAsyncTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(await client._get_mobile_clients(), [])
         client._login_mobile.assert_awaited_once()
+
+    async def test_static_page_parses_offline_named_reservation(self) -> None:
+        client = coordinator.IptimeClient.__new__(coordinator.IptimeClient)
+        client._api_mode = "legacy"
+        client._logged_in = True
+        page = """
+        <h2>등록된 주소 관리</h2>
+        <table>
+          <tr><th>IP 주소</th><th>MAC 주소</th><th>기기 이름</th></tr>
+          <tr><td>192.168.0.40</td><td>AA:BB:CC:DD:EE:FF</td><td>아빠폰</td></tr>
+        </table>
+        """
+        client._request_text = AsyncMock(return_value=(None, page))
+
+        leases = await client.get_static_leases()
+
+        self.assertEqual(
+            leases,
+            [
+                coordinator.StaticLease(
+                    mac="AA:BB:CC:DD:EE:FF",
+                    ip="192.168.0.40",
+                    hostname="아빠폰",
+                )
+            ],
+        )
+        self.assertEqual(client._static_route, ("GET", "lan_dhcp"))
+        self.assertEqual(await client.get_static_leases(), leases)
+        self.assertEqual(client._request_text.await_count, 2)
+
+    async def test_fetch_all_enriches_names_on_beta_without_overwriting_device_name(self) -> None:
+        client = coordinator.IptimeClient.__new__(coordinator.IptimeClient)
+        client._logged_in = True
+        client._api_mode = "beta"
+        client._mesh_enabled = False
+        client.get_wireless_clients = AsyncMock(
+            return_value=[
+                coordinator.WirelessClient(
+                    mac="AA:BB:CC:DD:EE:FF",
+                    ip="192.168.0.41",
+                    hostname="Galaxy-S24",
+                    interface="5GHz",
+                )
+            ]
+        )
+        client.get_dhcp_leases = AsyncMock(
+            return_value=[
+                coordinator.DhcpLease(
+                    mac="AA:BB:CC:DD:EE:FF",
+                    ip="192.168.0.41",
+                    hostname="dhcp-phone",
+                )
+            ]
+        )
+        client.get_static_leases = AsyncMock(
+            return_value=[
+                coordinator.StaticLease(
+                    mac="AA:BB:CC:DD:EE:FF",
+                    ip="192.168.0.41",
+                    hostname="아빠폰",
+                )
+            ]
+        )
+        client.get_wan_link_status = AsyncMock(return_value=None)
+
+        data = await client.fetch_all()
+
+        self.assertEqual(data.connected_clients[0].hostname, "Galaxy-S24")
+        self.assertEqual(data.connected_clients[0].reservation_name, "아빠폰")
+        client.get_dhcp_leases.assert_awaited_once()
+        client.get_static_leases.assert_awaited_once()
 
 
 if __name__ == "__main__":

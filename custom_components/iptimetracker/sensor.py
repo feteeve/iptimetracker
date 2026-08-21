@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import logging
 
-from homeassistant.components.sensor import SensorEntity
+from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import UnitOfDataRate
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN, MAX_ATTRIBUTE_ITEMS
+from .const import DOMAIN
 from .coordinator import IptimeDataUpdateCoordinator
 
 _LOGGER = logging.getLogger(__name__)
@@ -20,140 +21,36 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     coordinator: IptimeDataUpdateCoordinator = hass.data[DOMAIN][entry.entry_id]
-    async_add_entities([
-        IptimeConnectedCountSensor(coordinator, entry),
-        IptimeWirelessCountSensor(coordinator, entry),
-        IptimeDhcpCountSensor(coordinator, entry),
-        IptimeStaticLeasesSensor(coordinator, entry),
-    ])
+    async_add_entities([IptimeWanLinkSpeedSensor(coordinator, entry)])
 
 
-class _IptimeBaseSensor(CoordinatorEntity[IptimeDataUpdateCoordinator], SensorEntity):
+class IptimeWanLinkSpeedSensor(
+    CoordinatorEntity[IptimeDataUpdateCoordinator], SensorEntity
+):
+    """Negotiated link speed of the router's WAN (internet) port.
+
+    Pairs with the WAN connectivity binary_sensor: a working link that's
+    unexpectedly slow (e.g. 100Mbps instead of the usual 1000Mbps) is a
+    useful hint that the ISP side is degraded rather than fully down.
+    """
+
+    _attr_name = "ipTIME WAN 링크 속도"
+    _attr_device_class = SensorDeviceClass.DATA_RATE
+    _attr_native_unit_of_measurement = UnitOfDataRate.MEGABITS_PER_SECOND
+    _attr_icon = "mdi:speedometer"
+
     def __init__(
-        self, coordinator: IptimeDataUpdateCoordinator, entry: ConfigEntry, key: str
+        self, coordinator: IptimeDataUpdateCoordinator, entry: ConfigEntry
     ) -> None:
         super().__init__(coordinator)
-        self._attr_unique_id = f"{DOMAIN}_{entry.entry_id}_{key}"
-
-    @staticmethod
-    def _limited_attributes(key: str, items: list[dict]) -> dict:
-        """Bound large attributes because every change is stored by Recorder."""
-        limited = items[:MAX_ATTRIBUTE_ITEMS]
-        return {
-            key: limited,
-            "attributes_truncated": len(items) > len(limited),
-            "total_items": len(items),
-        }
-
-
-class IptimeConnectedCountSensor(_IptimeBaseSensor):
-    _attr_name = "ipTIME 연결 기기 수"
-    _attr_native_unit_of_measurement = "대"
-    _attr_icon = "mdi:lan-connect"
-
-    def __init__(self, coordinator: IptimeDataUpdateCoordinator, entry: ConfigEntry) -> None:
-        super().__init__(coordinator, entry, "connected_count")
+        self._attr_unique_id = f"{DOMAIN}_{entry.entry_id}_wan_link_speed"
 
     @property
-    def native_value(self) -> int:
-        return len(self.coordinator.data.connected_clients)
+    def available(self) -> bool:
+        wan = self.coordinator.data.wan_link
+        return super().available and wan is not None and wan.connected
 
     @property
-    def extra_state_attributes(self) -> dict:
-        return self._limited_attributes(
-            "devices",
-            [
-                {
-                    "mac": client.mac,
-                    "hostname": client.hostname,
-                    "ip": client.ip,
-                    "interface": client.interface,
-                    "rssi_dbm": client.rssi,
-                }
-                for client in self.coordinator.data.connected_clients
-            ],
-        )
-
-
-class IptimeWirelessCountSensor(_IptimeBaseSensor):
-    _attr_name = "ipTIME 무선 접속 기기 수"
-    _attr_native_unit_of_measurement = "대"
-    _attr_icon = "mdi:wifi"
-
-    def __init__(self, coordinator: IptimeDataUpdateCoordinator, entry: ConfigEntry) -> None:
-        super().__init__(coordinator, entry, "wireless_count")
-
-    @property
-    def native_value(self) -> int:
-        return len(self.coordinator.data.wireless_clients)
-
-    @property
-    def extra_state_attributes(self) -> dict:
-        return self._limited_attributes(
-            "devices",
-            [
-                {
-                    "mac": c.mac,
-                    "hostname": c.hostname,
-                    "ip": c.ip,
-                    "interface": c.interface,
-                    "rssi_dbm": c.rssi,
-                }
-                for c in self.coordinator.data.wireless_clients
-            ],
-        )
-
-
-class IptimeDhcpCountSensor(_IptimeBaseSensor):
-    _attr_name = "ipTIME DHCP 임대 수"
-    _attr_native_unit_of_measurement = "대"
-    _attr_icon = "mdi:ip-network"
-
-    def __init__(self, coordinator: IptimeDataUpdateCoordinator, entry: ConfigEntry) -> None:
-        super().__init__(coordinator, entry, "dhcp_count")
-
-    @property
-    def native_value(self) -> int:
-        return len(self.coordinator.data.dhcp_leases)
-
-    @property
-    def extra_state_attributes(self) -> dict:
-        return self._limited_attributes(
-            "leases",
-            [
-                {
-                    "mac": lease.mac,
-                    "ip": lease.ip,
-                    "hostname": lease.hostname,
-                    "expires": lease.expires,
-                }
-                for lease in self.coordinator.data.dhcp_leases
-            ],
-        )
-
-
-class IptimeStaticLeasesSensor(_IptimeBaseSensor):
-    _attr_name = "ipTIME 고정IP 설정 수"
-    _attr_native_unit_of_measurement = "개"
-    _attr_icon = "mdi:ip"
-
-    def __init__(self, coordinator: IptimeDataUpdateCoordinator, entry: ConfigEntry) -> None:
-        super().__init__(coordinator, entry, "static_count")
-
-    @property
-    def native_value(self) -> int:
-        return len(self.coordinator.data.static_leases)
-
-    @property
-    def extra_state_attributes(self) -> dict:
-        return self._limited_attributes(
-            "static_leases",
-            [
-                {
-                    "mac": s.mac,
-                    "ip": s.ip,
-                    "hostname": s.hostname,
-                }
-                for s in self.coordinator.data.static_leases
-            ],
-        )
+    def native_value(self) -> int | None:
+        wan = self.coordinator.data.wan_link
+        return wan.speed_mbps if wan else None

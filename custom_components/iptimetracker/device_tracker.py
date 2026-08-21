@@ -2,35 +2,29 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from homeassistant.components.device_tracker import ScannerEntity, SourceType
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.restore_state import RestoreEntity
-from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
-from .const import CONF_CONSIDER_HOME, CONF_TRACKED_MACS, DEFAULT_CONSIDER_HOME, DOMAIN
-from .coordinator import IptimeDataUpdateCoordinator, WirelessClient
+from .const import CONF_TRACKED_MACS, DOMAIN
+from .coordinator import (
+    DhcpLease,
+    IptimeDataUpdateCoordinator,
+    StaticLease,
+    WirelessClient,
+)
 
 _LOGGER = logging.getLogger(__name__)
-_STORE_VERSION = 1
 _MAC_UNIQUE_ID_PATTERN = re.compile(
     r"(?:^|_)([0-9A-Fa-f]{2}(?:[:_-][0-9A-Fa-f]{2}){5})$"
 )
-# Devices that never reconnect (a guest's phone, a one-off IoT visitor) would
-# otherwise pile up in the "known devices" store forever, each keeping its
-# own device_tracker entity around indefinitely. Drop anything not seen in
-# this many days.
-_KNOWN_DEVICE_RETENTION_DAYS = 30
-# How rarely a connected device's stored timestamp needs refreshing. Coarse on
-# purpose: the retention check only cares about ~30-day staleness, so there is
-# no reason to write the known-devices Store to disk on every 30s poll.
-_LAST_SEEN_REFRESH_INTERVAL = timedelta(hours=6)
 
 
 def _unique_id(entry: ConfigEntry, mac: str) -> str:
@@ -51,31 +45,16 @@ async def async_setup_entry(
 ) -> None:
     coordinator: IptimeDataUpdateCoordinator = hass.data[DOMAIN][entry.entry_id]
 
-    # None means the user has never visited the device-picker options step
-    # yet, so fall back to the old "track everything" behavior rather than
-    # silently dropping every entity on upgrade. An explicit (possibly
-    # empty) list means the picker is now the source of truth.
-    tracked_macs_option = entry.options.get(CONF_TRACKED_MACS)
-    allowed_macs: set[str] | None = (
-        {mac.upper() for mac in tracked_macs_option}
-        if tracked_macs_option is not None
-        else None
-    )
+    # The device picker (options flow) is the sole source of truth for what
+    # gets tracked. Nothing is added automatically just because the router
+    # reports it as connected, and nothing is auto-pruned by age either -
+    # unchecking a device in the picker is what removes its entity, so a
+    # deliberately-picked device (e.g. a named static-IP reservation that's
+    # normally offline) never gets treated as an abandoned/stale one.
+    allowed_macs: set[str] = {
+        mac.upper() for mac in entry.options.get(CONF_TRACKED_MACS, [])
+    }
 
-    store: Store[dict[str, object]] = Store(
-        hass, _STORE_VERSION, f"{DOMAIN}.{entry.entry_id}.known_devices"
-    )
-    stored = await store.async_load() or {}
-    last_seen_map: dict[str, str] = dict(stored.get("last_seen") or {})
-    tracked: set[str] = set()
-    # "macs" is the pre-retention store format (no timestamps); keep reading
-    # it so devices saved by an older release aren't dropped outright.
-    for stored_mac in stored.get("macs") or list(last_seen_map):
-        if mac := _mac_from_unique_id(stored_mac):
-            tracked.add(mac)
-
-    # Recover devices registered by older releases even if they are away at
-    # startup, and migrate their MAC-only unique IDs to router-scoped IDs.
     registry = er.async_get(hass)
     for registry_entry in er.async_entries_for_config_entry(registry, entry.entry_id):
         if registry_entry.domain != "device_tracker" or registry_entry.platform != DOMAIN:
@@ -83,55 +62,7 @@ async def async_setup_entry(
         mac = _mac_from_unique_id(registry_entry.unique_id)
         if not mac:
             continue
-        tracked.add(mac)
-
-    # Give every tracked device a baseline timestamp (rather than leaving it
-    # unset forever) so devices carried over from a pre-retention store, or
-    # from the entity registry, still age out eventually if they never
-    # reconnect after this upgrade.
-    now = dt_util.utcnow()
-    now_iso = now.isoformat()
-    for mac in tracked:
-        last_seen_map.setdefault(mac, now_iso)
-
-    cutoff = now - timedelta(days=_KNOWN_DEVICE_RETENTION_DAYS)
-    stale_macs: set[str] = set()
-    for mac in tracked:
-        last_seen = dt_util.parse_datetime(last_seen_map.get(mac, now_iso))
-        if last_seen is not None and last_seen < cutoff:
-            stale_macs.add(mac)
-    tracked -= stale_macs
-    for mac in stale_macs:
-        last_seen_map.pop(mac, None)
-        _LOGGER.info(
-            "ipTIME: %d일 이상 미접속 기기를 목록에서 제거: %s",
-            _KNOWN_DEVICE_RETENTION_DAYS,
-            mac,
-        )
-
-    # Devices the user unchecked in the options device picker: drop them the
-    # same way as a stale device (remove from tracking + entity registry)
-    # rather than leaving an orphaned, unmanaged entity behind.
-    unselected_macs: set[str] = set()
-    if allowed_macs is not None:
-        unselected_macs = {mac for mac in tracked if mac not in allowed_macs}
-        tracked -= unselected_macs
-        for mac in unselected_macs:
-            last_seen_map.pop(mac, None)
-        # Create an entity for every picked device right away, even one
-        # that's offline right now (e.g. a named static-IP reservation that
-        # hasn't connected yet) - otherwise it would only appear the first
-        # time it happens to show up in a live poll.
-        tracked |= allowed_macs
-    macs_to_remove = stale_macs | unselected_macs
-
-    for registry_entry in er.async_entries_for_config_entry(registry, entry.entry_id):
-        if registry_entry.domain != "device_tracker" or registry_entry.platform != DOMAIN:
-            continue
-        mac = _mac_from_unique_id(registry_entry.unique_id)
-        if not mac:
-            continue
-        if mac in macs_to_remove:
+        if mac not in allowed_macs:
             registry.async_remove(registry_entry.entity_id)
             continue
         expected_unique_id = _unique_id(entry, mac)
@@ -140,53 +71,20 @@ async def async_setup_entry(
                 registry_entry.entity_id, new_unique_id=expected_unique_id
             )
 
-    added: set[str] = set()
-
-    async def _save_known_devices() -> None:
-        await store.async_save({"last_seen": last_seen_map})
-
-    @callback
-    def _add_new_devices() -> None:
-        changed = False
-        now = dt_util.utcnow()
-        for client in coordinator.data.connected_clients:
-            if allowed_macs is not None and client.mac not in allowed_macs:
-                continue
-            if client.mac not in tracked:
-                tracked.add(client.mac)
-                last_seen_map[client.mac] = now.isoformat()
-                changed = True
-                continue
-            stored_last_seen = dt_util.parse_datetime(last_seen_map.get(client.mac, ""))
-            if (
-                stored_last_seen is None
-                or (now - stored_last_seen) > _LAST_SEEN_REFRESH_INTERVAL
-            ):
-                last_seen_map[client.mac] = now.isoformat()
-                changed = True
-        if changed:
-            hass.async_create_task(_save_known_devices())
-
-        new_entities = []
-        for mac in sorted(tracked):
-            if mac not in added:
-                added.add(mac)
-                new_entities.append(IptimeDeviceTracker(coordinator, entry, mac))
-        if new_entities:
-            async_add_entities(new_entities)
-
-    entry.async_on_unload(coordinator.async_add_listener(_add_new_devices))
-    _add_new_devices()
+    async_add_entities(
+        [IptimeDeviceTracker(coordinator, entry, mac) for mac in sorted(allowed_macs)]
+    )
 
 
 class IptimeDeviceTracker(
     CoordinatorEntity[IptimeDataUpdateCoordinator], ScannerEntity, RestoreEntity
 ):
-    """Track a device currently connected to the ipTIME router.
+    """Track a device's raw online/offline state on the ipTIME router.
 
-    A device that briefly drops off the client list (Wi-Fi power save, a
-    weak-signal hiccup) is kept "home" for CONF_CONSIDER_HOME seconds instead
-    of flipping to "away" immediately, to avoid presence flapping.
+    No presence smoothing (grace period, "consider home") is applied here -
+    this reflects exactly what the router reports on the latest poll. Any
+    flapping tolerance is expected to be handled by the user's own
+    automations on top of this state.
     """
 
     _attr_source_type = SourceType.ROUTER
@@ -196,7 +94,6 @@ class IptimeDeviceTracker(
     ) -> None:
         super().__init__(coordinator)
         self._mac = mac
-        self._entry = entry
         self._attr_unique_id = _unique_id(entry, mac)
         self._last_seen: datetime | None = None
 
@@ -222,19 +119,33 @@ class IptimeDeviceTracker(
         return None
 
     @property
+    def _dhcp_lease(self) -> DhcpLease | None:
+        return next(
+            (
+                lease
+                for lease in self.coordinator.data.dhcp_leases
+                if lease.mac == self._mac
+            ),
+            None,
+        )
+
+    @property
+    def _static_lease(self) -> StaticLease | None:
+        return next(
+            (
+                lease
+                for lease in self.coordinator.data.static_leases
+                if lease.mac == self._mac
+            ),
+            None,
+        )
+
+    @property
     def is_connected(self) -> bool:
         if self._client is not None:
             self._last_seen = dt_util.utcnow()
             return True
-
-        if self._last_seen is None:
-            return False
-
-        consider_home = self._entry.options.get(
-            CONF_CONSIDER_HOME,
-            self._entry.data.get(CONF_CONSIDER_HOME, DEFAULT_CONSIDER_HOME),
-        )
-        return (dt_util.utcnow() - self._last_seen).total_seconds() < consider_home
+        return False
 
     @property
     def mac_address(self) -> str:
@@ -243,26 +154,57 @@ class IptimeDeviceTracker(
     @property
     def hostname(self) -> str | None:
         c = self._client
-        # DHCP 목록에서 더 정확한 hostname 보완
+        # Keep the device-reported/DHCP hostname separate from the
+        # administrator-assigned static reservation name.
         if c and c.hostname and c.hostname != self._mac:
             return c.hostname
-        for lease in self.coordinator.data.dhcp_leases:
-            if lease.mac == self._mac and lease.hostname and lease.hostname != self._mac:
-                return lease.hostname
+        lease = self._dhcp_lease
+        if lease and lease.hostname and lease.hostname != self._mac:
+            return lease.hostname
         return self._mac
 
     @property
+    def reservation_name(self) -> str | None:
+        c = self._client
+        if c and c.reservation_name and c.reservation_name != self._mac:
+            return c.reservation_name
+        lease = self._static_lease
+        if lease and lease.hostname and lease.hostname != self._mac:
+            return lease.hostname
+        return None
+
+    @property
+    def device_name_source(self) -> str | None:
+        c = self._client
+        if c and c.hostname and c.hostname != self._mac:
+            return c.hostname_source or "connected_client"
+        lease = self._dhcp_lease
+        if lease and lease.hostname and lease.hostname != self._mac:
+            return lease.name_source
+        return None
+
+    @property
+    def reservation_name_source(self) -> tuple[str | None, str | None]:
+        c = self._client
+        if c and c.reservation_name and c.reservation_name != self._mac:
+            return c.reservation_name_source, c.reservation_name_confidence
+        lease = self._static_lease
+        if lease and lease.hostname and lease.hostname != self._mac:
+            return lease.name_source, lease.name_confidence
+        return None, None
+
+    @property
     def name(self) -> str:
-        return self.hostname or self._mac
+        return self.reservation_name or self.hostname or self._mac
 
     @property
     def ip_address(self) -> str | None:
         c = self._client
         if c and c.ip:
             return c.ip
-        for lease in self.coordinator.data.dhcp_leases:
-            if lease.mac == self._mac:
-                return lease.ip
+        lease = self._dhcp_lease
+        if lease:
+            return lease.ip
         return None
 
     @property
@@ -276,16 +218,31 @@ class IptimeDeviceTracker(
         if self._last_seen is not None:
             attrs["last_seen"] = self._last_seen.isoformat()
 
+        device_name = self.hostname
+        reservation_name = self.reservation_name
+        if device_name and device_name != self._mac:
+            attrs["device_name"] = device_name
+            attrs["device_name_source"] = self.device_name_source
+        if reservation_name:
+            attrs["reservation_name"] = reservation_name
+            reservation_source, reservation_confidence = self.reservation_name_source
+            attrs["reservation_name_source"] = reservation_source
+            attrs["reservation_name_confidence"] = reservation_confidence
+        if reservation_name:
+            attrs["name_source"] = "static_reservation"
+        elif device_name and device_name != self._mac:
+            attrs["name_source"] = "device_or_dhcp"
+        else:
+            attrs["name_source"] = "mac"
+
         # 고정IP 여부
-        for static in self.coordinator.data.static_leases:
-            if static.mac == self._mac:
-                attrs["static_ip"] = static.ip
-                break
+        static = self._static_lease
+        if static:
+            attrs["static_ip"] = static.ip
 
         # DHCP 만료 시간
-        for lease in self.coordinator.data.dhcp_leases:
-            if lease.mac == self._mac and lease.expires:
-                attrs["dhcp_expires"] = lease.expires
-                break
+        lease = self._dhcp_lease
+        if lease and lease.expires:
+            attrs["dhcp_expires"] = lease.expires
 
         return attrs

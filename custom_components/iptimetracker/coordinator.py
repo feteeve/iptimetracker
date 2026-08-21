@@ -5,6 +5,7 @@ import html as html_lib
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any
@@ -16,13 +17,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .const import (
-    CONF_RSSI_LIMIT,
-    CONF_SCAN_INTERVAL,
-    DEFAULT_RSSI_LIMIT,
-    DEFAULT_SCAN_INTERVAL,
-    DOMAIN,
-)
+from .const import DOMAIN, RSSI_LIMIT, SCAN_INTERVAL
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -46,6 +41,15 @@ class WirelessClient:
     hostname: str
     interface: str
     rssi: int | None = None
+    reservation_name: str | None = None
+    hostname_source: str | None = None
+    reservation_name_source: str | None = None
+    reservation_name_confidence: str | None = None
+
+    @property
+    def display_name(self) -> str:
+        """Prefer the administrator-assigned reservation name for display."""
+        return self.reservation_name or self.hostname or self.mac
 
 
 @dataclass
@@ -54,6 +58,7 @@ class DhcpLease:
     ip: str
     hostname: str
     expires: str | None = None
+    name_source: str = "lan_pcinfo_status"
 
 
 @dataclass
@@ -61,6 +66,23 @@ class StaticLease:
     mac: str
     ip: str
     hostname: str
+    name_source: str = "static_reservation_page"
+    name_confidence: str = "high"
+
+
+@dataclass
+class WanLinkStatus:
+    """Physical link state of the router's WAN (internet) port.
+
+    Off/no-link here points at the ISP/modem side, independent of anything
+    happening on Wi-Fi/LAN - useful for telling "the internet is down" apart
+    from "one specific device has a problem".
+    """
+
+    connected: bool
+    speed_mbps: int | None = None
+    duplex: str | None = None
+    raw: str | None = None
 
 
 @dataclass
@@ -69,6 +91,7 @@ class IptimeData:
     wireless_clients: list[WirelessClient] = field(default_factory=list)
     dhcp_leases: list[DhcpLease] = field(default_factory=list)
     static_leases: list[StaticLease] = field(default_factory=list)
+    wan_link: WanLinkStatus | None = None
 
 
 class IptimeClient:
@@ -97,13 +120,102 @@ class IptimeClient:
     )
     MESH_MOBILE_PATH = "/cgi/iux_get.cgi?tmenu=sysconf&smenu=info&act=status"
     MESH_STATION_PATH = "/easymesh/api.cgi?key=topology"
+    WAN_LINK_METHOD = "port/link/status"
+    STATIC_MENU_CANDIDATES = (
+        "lan_dhcp",
+        "lan_dhcp_server",
+        "lan_dhcp_static",
+        "lan_dhcp_staticlist",
+        "lan_dhcp_manual",
+        "lan_pcinfo",
+        "lan_pcinfo_status",
+    )
+
+    _LINK_SPEED_PATTERN = re.compile(r"^(\d+)([fh]?)$")
 
     _MAC_PATTERN = re.compile(r"([0-9A-Fa-f]{2}(?:[:-][0-9A-Fa-f]{2}){5})")
     _IP_PATTERN = re.compile(r"(\d{1,3}(?:\.\d{1,3}){3})")
     _RSSI_PATTERN = re.compile(r"(-?\d+)\s*dBm", re.IGNORECASE)
     _ROW_PATTERN = re.compile(r"<tr[^>]*>.*?</tr>", re.DOTALL | re.IGNORECASE)
     _CELL_PATTERN = re.compile(r"<td[^>]*>(.*?)</td>", re.DOTALL | re.IGNORECASE)
+    _ANY_CELL_PATTERN = re.compile(
+        r"<(?:td|th)[^>]*>(.*?)</(?:td|th)>", re.DOTALL | re.IGNORECASE
+    )
+    _TABLE_PATTERN = re.compile(
+        r"<table\b[^>]*>.*?</table>", re.DOTALL | re.IGNORECASE
+    )
     _TAG_PATTERN = re.compile(r"<[^>]+>")
+    _STATIC_MARKERS = (
+        "수동할당",
+        "수동 할당",
+        "고정할당",
+        "고정 할당",
+        "고정 ip",
+        "static",
+        "manual",
+        "reserved",
+        "reservation",
+    )
+    _STATIC_PAGE_MARKERS = (
+        "등록된 주소",
+        "주소 관리",
+        "고정 ip",
+        "수동 주소",
+        "static",
+        "reservation",
+        "reserved address",
+    )
+    _NAME_HEADER_MARKERS = (
+        "이름",
+        "등록명",
+        "별칭",
+        "장치",
+        "기기",
+        "호스트",
+        "설명",
+        "메모",
+        "name",
+        "host",
+        "alias",
+        "nickname",
+        "label",
+        "comment",
+        "description",
+    )
+    _NAME_FIELD_CANDIDATES = (
+        "name",
+        "hostname",
+        "host_name",
+        "device_name",
+        "pc_name",
+        "alias",
+        "nickname",
+        "label",
+        "comment",
+        "description",
+    )
+    _IP_HEADER_MARKERS = ("ip 주소", "ip address", "ip")
+    _MAC_HEADER_MARKERS = ("mac 주소", "mac address", "mac")
+    _NON_NAME_VALUES = {
+        "유선",
+        "무선",
+        "wired",
+        "wireless",
+        "삭제",
+        "등록",
+        "추가",
+        "선택",
+        "delete",
+        "add",
+        "apply",
+        "수동할당",
+        "수동 할당",
+        "자동할당",
+        "자동 할당",
+        "manual",
+        "static",
+        "dynamic",
+    }
 
     def __init__(self, host: str, username: str, password: str) -> None:
         self._base_url = self.normalize_host(host)
@@ -113,6 +225,9 @@ class IptimeClient:
         self._api_mode: str | None = None  # "beta" | "legacy" | "mobile"
         self._logged_in = False
         self._mesh_enabled = False
+        self._legacy_enrichment_unavailable = False
+        self._static_route: tuple[str, str] | None = None
+        self._static_probe_after = 0.0
 
     _SCHEME_PREFIX_PATTERN = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://")
 
@@ -229,6 +344,7 @@ class IptimeClient:
         the caller always learns exactly why a login attempt failed instead
         of a generic False.
         """
+        previous_mode = self._api_mode
         self._logged_in = False
         self._mesh_enabled = False
 
@@ -265,6 +381,10 @@ class IptimeClient:
                 raise last_error
             raise UpdateFailed("지원되는 ipTIME 로그인 방식을 찾지 못했습니다")
 
+        if previous_mode != self._api_mode:
+            self._legacy_enrichment_unavailable = False
+            self._static_route = None
+            self._static_probe_after = 0.0
         self._mesh_enabled = await self._detect_mesh_enabled()
         if self._mesh_enabled:
             _LOGGER.info("ipTIME EasyMesh 감지됨: 위성 기기도 함께 추적합니다")
@@ -544,6 +664,8 @@ class IptimeClient:
 
         clients: list[WirelessClient] = []
         for device in result:
+            if not isinstance(device, dict):
+                continue
             connection = device.get("connection") or {}
             connection_type = str(connection.get("type") or "unknown")
             details = connection.get(connection_type) or {}
@@ -559,19 +681,21 @@ class IptimeClient:
                 interface = connection_type
                 rssi = None
             info = device.get("info") or {}
+            mac = self._normalize_mac(str(device.get("mac", "")))
+            name = self._name_from_mappings(mac, info, device)
+            if not name and mac:
+                _LOGGER.debug("ipTIME beta 기기 이름 필드 없음")
             clients.append(
                 WirelessClient(
-                    mac=self._normalize_mac(str(device.get("mac", ""))),
+                    mac=mac,
                     ip=str(info.get("ip") or ""),
-                    hostname=str(
-                        info.get("name")
-                        or info.get("hostname")
-                        or device.get("mac")
-                    ),
+                    hostname=str(name or mac),
                     interface=interface,
                     rssi=rssi,
+                    hostname_source="beta_info" if name else None,
                 )
             )
+        self._log_json_name_diagnostics(source="beta:stations", entries=result)
         return [client for client in clients if client.mac]
 
     async def _get_mobile_clients(self) -> list[WirelessClient]:
@@ -604,16 +728,23 @@ class IptimeClient:
                 continue
             successful_requests += 1
             for device in payload.get("stalist") or []:
+                if not isinstance(device, dict):
+                    continue
                 mac = self._normalize_mac(str(device.get("mac", "")))
                 if not mac:
                     continue
+                name = self._name_from_mappings(mac, device)
                 clients[mac] = WirelessClient(
                     mac=mac,
                     ip=str(device.get("ipaddr") or ""),
-                    hostname=str(device.get("hostname") or device.get("name") or mac),
+                    hostname=name or mac,
                     interface=interface,
                     rssi=self._as_int(device.get("rssi")),
+                    hostname_source="mobile_stalist" if name else None,
                 )
+            self._log_json_name_diagnostics(
+                source=f"mobile:{interface}", entries=payload.get("stalist") or []
+            )
         if session_expired:
             self._logged_in = False
             if retry_on_auth:
@@ -658,6 +789,45 @@ class IptimeClient:
             _LOGGER.debug("ipTIME EasyMesh 감지 실패(정상: 메쉬 미사용 공유기일 수 있음): %s", err)
             return False
 
+    async def get_wan_link_status(self) -> WanLinkStatus | None:
+        """Physical link state of the WAN port (beta UI only for now).
+
+        Not available on legacy/mobile firmware since this queries a beta-UI
+        JSON-RPC method (confirmed against the community iptime_manager
+        project); returns None there rather than a misleading guess.
+        """
+        if self._api_mode != "beta":
+            return None
+        try:
+            _, payload = await self._request_json(self.WAN_LINK_METHOD, retry_on_auth=False)
+        except UpdateFailed as err:
+            _LOGGER.debug("ipTIME WAN 링크 상태 조회 실패: %s", err)
+            return None
+        result = payload.get("result")
+        if not isinstance(result, list):
+            return None
+        wan_port = next(
+            (
+                port for port in result
+                if isinstance(port, dict) and str(port.get("type", "")).lower() == "wan"
+            ),
+            None,
+        )
+        if wan_port is None:
+            return None
+        link = wan_port.get("link")
+        if link in (None, "", "null"):
+            return WanLinkStatus(connected=False)
+        match = self._LINK_SPEED_PATTERN.match(str(link))
+        if not match:
+            return WanLinkStatus(connected=True, raw=str(link))
+        return WanLinkStatus(
+            connected=True,
+            speed_mbps=int(match.group(1)),
+            duplex={"f": "full", "h": "half"}.get(match.group(2)) or None,
+            raw=str(link),
+        )
+
     async def get_mesh_clients(self, rssi_limit: int) -> list[WirelessClient]:
         """Devices connected to EasyMesh satellite units, filtered by RSSI."""
         if not self._mesh_enabled:
@@ -681,13 +851,15 @@ class IptimeClient:
             rssi = self._as_int(station.get("rssi"))
             if rssi is not None and rssi < rssi_limit:
                 continue
+            station_name = self._name_from_mappings(mac, station)
             clients.append(
                 WirelessClient(
                     mac=mac,
                     ip=str(station.get("ip") or ""),
-                    hostname=str(station.get("name") or mac),
+                    hostname=station_name or mac,
                     interface=f"메쉬-{station.get('mode') or 'unknown'}",
                     rssi=rssi,
+                    hostname_source=("easymesh_topology" if station_name else None),
                 )
             )
         return clients
@@ -763,19 +935,27 @@ class IptimeClient:
             ]
             ip = next((valid for cell in cells if (valid := self._valid_ip(cell))), "")
             rssi_match = self._RSSI_PATTERN.search(" ".join(cells))
-            hostname = next(
-                (
-                    cell
-                    for cell in reversed(cells)
-                    if cell
-                    and not self._MAC_PATTERN.search(cell)
-                    and not self._IP_PATTERN.search(cell)
-                    and not self._RSSI_PATTERN.search(cell)
-                    and not re.fullmatch(r"\d+", cell)
-                ),
-                "",
-            )
             mac = self._normalize_mac(mac_match.group(1))
+            # lan_pcinfo_status uses the stable IP / MAC / hostname /
+            # connection-assignment layout.  Prefer that known column before
+            # falling back to a heuristic; scanning from the end incorrectly
+            # treated values such as "무선 : 수동할당" as a hostname.
+            hostname = ""
+            if (
+                len(cells) >= 3
+                and self._valid_ip(cells[0])
+                and self._normalize_mac(cells[1]) == mac
+            ):
+                hostname = self._clean_name(cells[2], mac)
+            if not hostname:
+                hostname = next(
+                    (
+                        cleaned
+                        for cell in cells
+                        if (cleaned := self._clean_name(cell, mac))
+                    ),
+                    "",
+                )
             clients.append(
                 WirelessClient(
                     mac=mac,
@@ -783,6 +963,7 @@ class IptimeClient:
                     hostname=hostname or mac,
                     interface=interface,
                     rssi=int(rssi_match.group(1)) if rssi_match else None,
+                    hostname_source="classic_html" if hostname else None,
                 )
             )
         return clients
@@ -806,66 +987,317 @@ class IptimeClient:
                 _LOGGER.debug("ipTIME DHCP 조회(%s) 실패: %s", method, err)
                 continue
             if self._is_login_page(page):
+                if self._api_mode == "beta":
+                    _LOGGER.debug(
+                        "ipTIME beta 세션으로 구형 DHCP 페이지 접근 불가; 보조 조회 생략"
+                    )
+                    self._legacy_enrichment_unavailable = True
+                    return []
                 self._logged_in = False
                 raise IptimeSessionExpired("ipTIME DHCP 조회 중 세션이 만료되었습니다")
             if leases := self._parse_dhcp_leases(page):
+                self._log_name_diagnostics(
+                    source=f"dhcp:{method}",
+                    page=page,
+                    rows=self._parse_address_rows(page),
+                )
                 return leases
         return []
 
     def _parse_dhcp_leases(self, page: str) -> list[DhcpLease]:
-        leases: list[DhcpLease] = []
-        for row in self._ROW_PATTERN.finditer(page):
-            row_text = row.group()
-            mac_match = self._MAC_PATTERN.search(row_text)
-            ip = self._valid_ip(row_text)
-            if not mac_match or not ip:
+        return [
+            DhcpLease(mac=mac, ip=ip, hostname=name or mac)
+            for mac, ip, name, _assignment in self._parse_address_rows(page)
+        ]
+
+    def _parse_address_rows(
+        self, page: str
+    ) -> list[tuple[str, str, str, str]]:
+        """Parse IP/MAC/name/assignment rows across known HTML layouts.
+
+        Header-derived indexes take priority. A positional fallback supports
+        the long-standing lan_pcinfo_status IP/MAC/name layout, and a final
+        semantic fallback handles tables reordered by a firmware update.
+        """
+        parsed: dict[str, tuple[str, str, str, str]] = {}
+        tables = [match.group() for match in self._TABLE_PATTERN.finditer(page)]
+        for table in tables or [page]:
+            rows = [match.group() for match in self._ROW_PATTERN.finditer(table)]
+            headers: list[str] = []
+            for row in rows:
+                if self._MAC_PATTERN.search(row) and self._IP_PATTERN.search(row):
+                    continue
+                candidate_headers = [
+                    self._clean_cell(match.group(1)).lower()
+                    for match in self._ANY_CELL_PATTERN.finditer(row)
+                ]
+                if candidate_headers:
+                    headers = candidate_headers
+            ip_index = self._header_index(headers, self._IP_HEADER_MARKERS)
+            mac_index = self._header_index(headers, self._MAC_HEADER_MARKERS)
+            name_index = self._header_index(headers, self._NAME_HEADER_MARKERS)
+
+            for row in rows:
+                cells = [
+                    self._clean_cell(match.group(1))
+                    for match in self._ANY_CELL_PATTERN.finditer(row)
+                ]
+                row_text = " ".join(cells)
+                mac = ""
+                ip = ""
+                if mac_index is not None and mac_index < len(cells):
+                    mac = self._normalize_mac(cells[mac_index])
+                if ip_index is not None and ip_index < len(cells):
+                    ip = self._valid_ip(cells[ip_index])
+                mac = mac or self._normalize_mac(row_text)
+                ip = ip or self._valid_ip(row_text)
+                if not mac or not ip:
+                    continue
+
+                name = ""
+                if name_index is not None and name_index < len(cells):
+                    name = self._clean_name(cells[name_index], mac)
+                # Confirmed classic layout: IP / MAC / hostname / assignment.
+                if (
+                    not name
+                    and len(cells) >= 3
+                    and self._valid_ip(cells[0]) == ip
+                    and self._normalize_mac(cells[1]) == mac
+                ):
+                    name = self._clean_name(cells[2], mac)
+                if not name:
+                    name = next(
+                        (
+                            cleaned
+                            for cell in cells
+                            if (cleaned := self._clean_name(cell, mac))
+                        ),
+                        "",
+                    )
+                assignment = next(
+                    (
+                        cell
+                        for cell in cells
+                        if self._contains_marker(cell, self._STATIC_MARKERS)
+                    ),
+                    "",
+                )
+                candidate = (mac, ip, name, assignment)
+                previous = parsed.get(mac)
+                if previous is None or (not previous[2] and name):
+                    parsed[mac] = candidate
+        return list(parsed.values())
+
+    @staticmethod
+    def _contains_marker(value: str, markers: tuple[str, ...]) -> bool:
+        lowered = str(value or "").casefold()
+        return any(marker.casefold() in lowered for marker in markers)
+
+    @classmethod
+    def _header_index(
+        cls, headers: list[str], markers: tuple[str, ...]
+    ) -> int | None:
+        for index, header in enumerate(headers):
+            compact = " ".join(header.split()).casefold()
+            for marker in markers:
+                normalized = marker.casefold()
+                if normalized in {"ip", "mac"}:
+                    if re.search(rf"(?<![a-z0-9]){normalized}(?![a-z0-9])", compact):
+                        return index
+                elif normalized in compact:
+                    return index
+        return None
+
+    @classmethod
+    def _clean_name(cls, value: Any, mac: str) -> str:
+        text = " ".join(str(value or "").split()).strip()
+        if not text:
+            return ""
+        lowered = text.casefold()
+        if (
+            cls._normalize_mac(text)
+            or cls._valid_ip(text)
+            or cls._RSSI_PATTERN.search(text)
+            or re.fullmatch(r"[\d\s:./-]+", text)
+            or lowered in cls._NON_NAME_VALUES
+            or cls._contains_marker(text, cls._STATIC_MARKERS)
+            or cls._normalize_mac(mac) == cls._normalize_mac(text)
+        ):
+            return ""
+        return text
+
+    @classmethod
+    def _name_from_mappings(cls, mac: str, *mappings: Any) -> str:
+        for mapping in mappings:
+            if not isinstance(mapping, dict):
                 continue
-            cells = [
-                self._clean_cell(match.group(1))
-                for match in self._CELL_PATTERN.finditer(row_text)
-            ]
-            mac = self._normalize_mac(mac_match.group(1))
-            hostname = next(
-                (
-                    cell
-                    for cell in cells
-                    if cell
-                    and not self._MAC_PATTERN.search(cell)
-                    and not self._IP_PATTERN.search(cell)
-                ),
-                mac,
-            )
-            leases.append(DhcpLease(mac=mac, ip=ip, hostname=hostname))
-        return leases
+            for field in cls._NAME_FIELD_CANDIDATES:
+                if name := cls._clean_name(mapping.get(field), mac):
+                    return name
+        return ""
+
+    @classmethod
+    def _log_name_diagnostics(
+        cls,
+        *,
+        source: str,
+        page: str,
+        rows: list[tuple[str, str, str, str]],
+    ) -> None:
+        """Log only schema-level hints; never dump cookies or full HTML."""
+        if not _LOGGER.isEnabledFor(logging.DEBUG):
+            return
+        headers: list[str] = []
+        for match in re.finditer(
+            r"<th[^>]*>(.*?)</th>", page, re.DOTALL | re.IGNORECASE
+        ):
+            header = cls._clean_cell(match.group(1))
+            if header:
+                headers.append(header[:80])
+        masked = [
+            f"**:**:**:{mac.split(':')[-3]}:{mac.split(':')[-2]}:{mac.split(':')[-1]}"
+            for mac, _ip, _name, _assignment in rows[:10]
+            if len(mac.split(":")) == 6
+        ]
+        _LOGGER.debug(
+            "ipTIME 이름 진단 source=%s headers=%s rows=%d macs=%s",
+            source,
+            headers[:20],
+            len(rows),
+            masked,
+        )
+
+    @staticmethod
+    def _log_json_name_diagnostics(*, source: str, entries: Any) -> None:
+        """Record schema hints without logging names, IPs, MACs or payloads."""
+        if not _LOGGER.isEnabledFor(logging.DEBUG) or not isinstance(entries, list):
+            return
+        device_keys: set[str] = set()
+        info_keys: set[str] = set()
+        for entry in entries[:10]:
+            if not isinstance(entry, dict):
+                continue
+            device_keys.update(str(key) for key in entry)
+            info = entry.get("info")
+            if isinstance(info, dict):
+                info_keys.update(str(key) for key in info)
+        _LOGGER.debug(
+            "ipTIME 이름 진단 source=%s entries=%d device_keys=%s info_keys=%s",
+            source,
+            len(entries),
+            sorted(device_keys),
+            sorted(info_keys),
+        )
 
     async def get_static_leases(self) -> list[StaticLease]:
-        # Menu names differ between firmware generations. An unsupported menu
-        # is harmless; only return once a page contains parseable mappings.
-        for menu in ("lan_dhcp_static", "lan_dhcp_staticlist", "lan_dhcp_manual"):
+        # Firmware generations use different menu names and sometimes keep
+        # active/manual assignments and offline reservations in separate
+        # tables. Try both request styles, but accept a page only when its
+        # contents look like a reservation table (or an individual row is
+        # explicitly marked manual/static).
+        found: dict[str, StaticLease] = {}
+        cached_route = getattr(self, "_static_route", None)
+        if (
+            cached_route is None
+            and time.monotonic() < getattr(self, "_static_probe_after", 0.0)
+        ):
+            return []
+        routes = (
+            [cached_route]
+            if cached_route
+            else [
+                (method, menu)
+                for menu in self.STATIC_MENU_CANDIDATES
+                for method in ("GET", "POST")
+            ]
+        )
+        for method, menu in routes:
+            request_data = (
+                {"params": {"tmenu": "iframe", "smenu": menu}}
+                if method == "GET"
+                else {"data": {"tmenu": "iframe", "smenu": menu}}
+            )
             try:
                 _, page = await self._request_text(
-                    "GET",
-                    self.LEGACY_DATA_PATH,
-                    params={"tmenu": "iframe", "smenu": menu},
+                    method, self.LEGACY_DATA_PATH, **request_data
                 )
-            except UpdateFailed:
+            except UpdateFailed as err:
+                _LOGGER.debug(
+                    "ipTIME 고정 DHCP 조회 실패(menu=%s method=%s): %s",
+                    menu,
+                    method,
+                    err,
+                )
                 continue
             if self._is_login_page(page):
+                if self._api_mode == "beta":
+                    _LOGGER.debug(
+                        "ipTIME beta 세션으로 구형 고정 DHCP 페이지 접근 불가"
+                    )
+                    self._legacy_enrichment_unavailable = True
+                    return []
                 self._logged_in = False
                 raise IptimeSessionExpired(
                     "ipTIME 고정 DHCP 조회 중 세션이 만료되었습니다"
                 )
-            if "static" not in page.lower() and "고정" not in page:
-                continue
-            leases = [
-                StaticLease(mac=item.mac, ip=item.ip, hostname=item.hostname)
-                for item in self._parse_dhcp_leases(page)
+            cleaned_page = self._clean_cell(page)
+            page_is_static = self._contains_marker(
+                cleaned_page, self._STATIC_PAGE_MARKERS
+            )
+            schema_looks_relevant = (
+                page_is_static
+                and "mac" in cleaned_page.casefold()
+                and "ip" in cleaned_page.casefold()
+            )
+            sections = [
+                match.group() for match in self._TABLE_PATTERN.finditer(page)
+            ] or [page]
+            address_sections = [
+                (section, section_rows)
+                for section in sections
+                if (section_rows := self._parse_address_rows(section))
             ]
-            if leases:
-                return leases
+            rows = self._parse_address_rows(page)
+            self._log_name_diagnostics(
+                source=f"static:{menu}:{method}", page=page, rows=rows
+            )
+            route_has_static_rows = False
+            for section, section_rows in address_sections:
+                section_is_static = self._contains_marker(
+                    self._clean_cell(section), self._STATIC_PAGE_MARKERS
+                ) or (page_is_static and len(address_sections) == 1)
+                for mac, ip, name, assignment in section_rows:
+                    row_is_static = self._contains_marker(
+                        assignment, self._STATIC_MARKERS
+                    )
+                    if not section_is_static and not row_is_static:
+                        continue
+                    route_has_static_rows = True
+                    candidate = StaticLease(
+                        mac=mac,
+                        ip=ip,
+                        hostname=name or mac,
+                        name_source=(
+                            "static_reservation_page"
+                            if section_is_static
+                            else "manual_assignment_row"
+                        ),
+                        name_confidence="high" if section_is_static else "low",
+                    )
+                    previous = found.get(mac)
+                    if previous is None or (
+                        previous.hostname == previous.mac
+                        and candidate.hostname != candidate.mac
+                    ):
+                        found[mac] = candidate
+            if schema_looks_relevant or route_has_static_rows:
+                self._static_route = (method, menu)
+                return list(found.values())
+        self._static_route = None
+        self._static_probe_after = time.monotonic() + 3600
         return []
 
-    async def fetch_all(self, rssi_limit: int = DEFAULT_RSSI_LIMIT) -> IptimeData:
+    async def fetch_all(self, rssi_limit: int = RSSI_LIMIT) -> IptimeData:
         if not self._logged_in and not await self.login():
             raise UpdateFailed("ipTIME 로그인 실패: 계정 또는 CAPTCHA 설정을 확인하세요")
 
@@ -876,37 +1308,70 @@ class IptimeClient:
             await self.login()  # raises with the specific reason if this fails too
             wireless = await self.get_wireless_clients()
 
-        # timepro's client page is also available in many mobile/classic builds
-        # and fills in wired devices that the mobile WLAN API does not expose.
+        # timepro's pages remain available alongside several beta/mobile
+        # builds. Treat them as optional enrichment on every UI generation.
         dhcp = []
         static = []
-        if self._api_mode in {"mobile", "legacy", "original"}:
-            try:
+        try:
+            if not getattr(self, "_legacy_enrichment_unavailable", False):
                 dhcp = await self.get_dhcp_leases()
+            if not getattr(self, "_legacy_enrichment_unavailable", False):
                 static = await self.get_static_leases()
-            except IptimeSessionExpired:
-                _LOGGER.info("ipTIME 보조 목록 조회 중 세션 만료, 재로그인 후 재조회")
-                await self.login()
+        except IptimeSessionExpired:
+            _LOGGER.info("ipTIME 보조 목록 조회 중 세션 만료, 재로그인 후 재조회")
+            await self.login()
+            if not getattr(self, "_legacy_enrichment_unavailable", False):
                 dhcp = await self.get_dhcp_leases()
+            if not getattr(self, "_legacy_enrichment_unavailable", False):
                 static = await self.get_static_leases()
+        except UpdateFailed as err:
+            # Name/reservation enrichment must never make presence tracking
+            # unavailable when a firmware removes one of these private pages.
+            _LOGGER.debug("ipTIME 보조 이름/고정 DHCP 조회 생략: %s", err)
         mesh = await self.get_mesh_clients(rssi_limit) if self._mesh_enabled else []
+        wan_link = await self.get_wan_link_status()
         connected = {client.mac: client for client in wireless}
         # The classic UI exposes wired clients through lan_pcinfo_status and
         # wireless clients through separate per-band pages.
         for lease in dhcp:
-            connected.setdefault(
-                lease.mac,
-                WirelessClient(
+            existing = connected.get(lease.mac)
+            if existing is None:
+                connected[lease.mac] = WirelessClient(
                     mac=lease.mac,
                     ip=lease.ip,
                     hostname=lease.hostname,
                     interface="LAN/unknown",
-                ),
-            )
+                    hostname_source=lease.name_source,
+                )
+                continue
+            if not existing.ip:
+                existing.ip = lease.ip
+            if self._clean_name(existing.hostname, existing.mac) == "":
+                existing.hostname = lease.hostname
+                existing.hostname_source = lease.name_source
         # EasyMesh satellite stations aren't visible to the main router's own
         # client list, so they're merged in (and take priority: they carry RSSI).
         for client in mesh:
+            existing = connected.get(client.mac)
+            if existing:
+                if not client.ip:
+                    client.ip = existing.ip
+                if self._clean_name(client.hostname, client.mac) == "":
+                    client.hostname = existing.hostname
+                    client.hostname_source = existing.hostname_source
+                client.reservation_name = existing.reservation_name
+                client.reservation_name_source = existing.reservation_name_source
+                client.reservation_name_confidence = (
+                    existing.reservation_name_confidence
+                )
             connected[client.mac] = client
+        static_by_mac = {lease.mac: lease for lease in static}
+        for mac, client in connected.items():
+            reservation = static_by_mac.get(mac)
+            if reservation and self._clean_name(reservation.hostname, mac):
+                client.reservation_name = reservation.hostname
+                client.reservation_name_source = reservation.name_source
+                client.reservation_name_confidence = reservation.name_confidence
         connected_clients = list(connected.values())
         wireless_clients = [
             client
@@ -925,6 +1390,7 @@ class IptimeClient:
             wireless_clients=wireless_clients,
             dhcp_leases=dhcp,
             static_leases=static,
+            wan_link=wan_link,
         )
 
     @classmethod
@@ -981,21 +1447,14 @@ class IptimeDataUpdateCoordinator(DataUpdateCoordinator[IptimeData]):
     def __init__(
         self, hass: HomeAssistant, client: IptimeClient, entry: ConfigEntry
     ) -> None:
-        scan_interval = entry.options.get(
-            CONF_SCAN_INTERVAL,
-            entry.data.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL),
-        )
         super().__init__(
             hass,
             _LOGGER,
             name=DOMAIN,
-            update_interval=timedelta(seconds=scan_interval),
+            update_interval=timedelta(seconds=SCAN_INTERVAL),
         )
         self.client = client
         self.entry = entry
 
     async def _async_update_data(self) -> IptimeData:
-        rssi_limit = self.entry.options.get(
-            CONF_RSSI_LIMIT, self.entry.data.get(CONF_RSSI_LIMIT, DEFAULT_RSSI_LIMIT)
-        )
-        return await self.client.fetch_all(rssi_limit=rssi_limit)
+        return await self.client.fetch_all(rssi_limit=RSSI_LIMIT)

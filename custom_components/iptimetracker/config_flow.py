@@ -15,17 +15,11 @@ except ImportError:  # pragma: no cover - depends on the HA version installed
     from homeassistant.components.ssdp import SsdpServiceInfo
 
 from .const import (
-    CONF_CONSIDER_HOME,
     CONF_HOST,
     CONF_PASSWORD,
-    CONF_RSSI_LIMIT,
-    CONF_SCAN_INTERVAL,
     CONF_TRACKED_MACS,
     CONF_USERNAME,
-    DEFAULT_CONSIDER_HOME,
     DEFAULT_HOST,
-    DEFAULT_RSSI_LIMIT,
-    DEFAULT_SCAN_INTERVAL,
     DEFAULT_USERNAME,
     DOMAIN,
 )
@@ -38,9 +32,91 @@ from .coordinator import (
 
 _LOGGER = logging.getLogger(__name__)
 
-CONSIDER_HOME_VALIDATOR = vol.All(vol.Coerce(int), vol.Range(min=0, max=86400))
-RSSI_VALIDATOR = vol.All(vol.Coerce(int), vol.Range(min=-120, max=0))
-SCAN_INTERVAL_VALIDATOR = vol.All(vol.Coerce(int), vol.Range(min=10, max=3600))
+
+def _ip_sort_key(ip: str) -> tuple[int, ...]:
+    try:
+        parts = tuple(int(part) for part in ip.split("."))
+    except (ValueError, AttributeError):
+        return (999, 999, 999, 999)
+    return parts if len(parts) == 4 else (999, 999, 999, 999)
+
+
+def _build_device_choices(data: object, currently_tracked: set[str]) -> dict[str, str]:
+    """List known devices while keeping reported and reservation names distinct.
+
+    Sourced from live connected clients and named static-IP reservations,
+    sorted by IP. A previously selected device that isn't in either list
+    right now is kept (as offline) so picking it again doesn't require it
+    to reconnect first.
+    """
+    entries: dict[str, dict[str, str]] = {}
+    if data is not None:
+        for client in data.connected_clients:
+            if not client.mac:
+                continue
+            entries[client.mac] = {
+                "ip": client.ip,
+                "device_name": (
+                    client.hostname
+                    if client.hostname and client.hostname != client.mac
+                    else ""
+                ),
+                "reservation_name": client.reservation_name or "",
+                "static_ip": "",
+                "reservation_confidence": client.reservation_name_confidence or "",
+            }
+        for lease in data.static_leases:
+            if not lease.mac:
+                continue
+            entry = entries.setdefault(
+                lease.mac,
+                {
+                    "ip": lease.ip,
+                    "device_name": "",
+                    "reservation_name": "",
+                    "static_ip": lease.ip,
+                    "reservation_confidence": lease.name_confidence,
+                },
+            )
+            entry["static_ip"] = lease.ip
+            if lease.hostname and lease.hostname != lease.mac:
+                entry["reservation_name"] = lease.hostname
+                entry["reservation_confidence"] = lease.name_confidence
+    for mac in currently_tracked:
+        entries.setdefault(
+            mac,
+            {
+                "ip": "",
+                "device_name": "",
+                "reservation_name": "",
+                "static_ip": "",
+                "reservation_confidence": "",
+            },
+        )
+
+    choices: dict[str, str] = {}
+    ordered = sorted(entries.items(), key=lambda item: _ip_sort_key(item[1]["ip"]))
+    for mac, info in ordered:
+        device_name = info["device_name"]
+        reservation_name = info["reservation_name"]
+        reservation_label = (
+            f"{reservation_name} (추정)"
+            if reservation_name and info["reservation_confidence"] == "low"
+            else reservation_name
+        )
+        if reservation_name and device_name and reservation_name != device_name:
+            names = f"등록명: {reservation_label} / 기기명: {device_name}"
+        elif reservation_name:
+            names = f"등록명: {reservation_label}"
+        elif device_name:
+            names = f"기기명: {device_name}"
+        else:
+            names = "이름 없음"
+        static_suffix = (
+            f" / 고정 IP: {info['static_ip']}" if info["static_ip"] else ""
+        )
+        choices[mac] = f"{info['ip'] or '?'} - {mac}\n{names}{static_suffix}"
+    return choices
 
 
 def _user_schema(*, default_host: str) -> vol.Schema:
@@ -49,15 +125,6 @@ def _user_schema(*, default_host: str) -> vol.Schema:
             vol.Required(CONF_HOST, default=default_host): str,
             vol.Required(CONF_USERNAME, default=DEFAULT_USERNAME): str,
             vol.Required(CONF_PASSWORD): str,
-            vol.Optional(
-                CONF_SCAN_INTERVAL, default=DEFAULT_SCAN_INTERVAL
-            ): SCAN_INTERVAL_VALIDATOR,
-            vol.Optional(
-                CONF_CONSIDER_HOME, default=DEFAULT_CONSIDER_HOME
-            ): CONSIDER_HOME_VALIDATOR,
-            vol.Optional(
-                CONF_RSSI_LIMIT, default=DEFAULT_RSSI_LIMIT
-            ): RSSI_VALIDATOR,
         }
     )
 
@@ -132,6 +199,9 @@ class IptimeTrackerConfigFlow(ConfigFlow, domain=DOMAIN):
             )
             try:
                 await client.login()
+                # Device selection happens later from the integration's own
+                # settings (⚙️), which can query the router live at any
+                # time - keep initial setup to just the credentials.
                 return self.async_create_entry(
                     title=f"ipTIME ({user_input[CONF_HOST]})",
                     data=user_input,
@@ -189,74 +259,36 @@ class IptimeTrackerConfigFlow(ConfigFlow, domain=DOMAIN):
 
 
 class IptimeTrackerOptionsFlow(OptionsFlow):
-    """Let the user tune presence-detection behavior after setup."""
+    """Pick which routed devices get a device_tracker entity.
+
+    This is the only options step: opening the integration's settings goes
+    straight to the device picker, built from what the router reports right
+    now (connected clients and named static-IP reservations) instead of
+    asking the user to type MAC addresses blind.
+    """
 
     def __init__(self, config_entry: ConfigEntry) -> None:
         # Keep compatibility with HA releases predating OptionsFlow.config_entry.
         self._provided_config_entry = config_entry
-        self._pending_options: dict[str, object] = {}
 
     async def async_step_init(
         self, user_input: dict[str, object] | None = None
     ) -> ConfigFlowResult:
-        if user_input is not None:
-            self._pending_options = user_input
-            return await self.async_step_devices()
-
-        config_entry = getattr(self, "config_entry", self._provided_config_entry)
-        current_scan_interval = config_entry.options.get(
-            CONF_SCAN_INTERVAL,
-            config_entry.data.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL),
-        )
-        current_consider_home = config_entry.options.get(
-            CONF_CONSIDER_HOME,
-            config_entry.data.get(CONF_CONSIDER_HOME, DEFAULT_CONSIDER_HOME),
-        )
-        current_rssi_limit = config_entry.options.get(
-            CONF_RSSI_LIMIT,
-            config_entry.data.get(CONF_RSSI_LIMIT, DEFAULT_RSSI_LIMIT),
-        )
-        return self.async_show_form(
-            step_id="init",
-            data_schema=vol.Schema(
-                {
-                    vol.Optional(
-                        CONF_SCAN_INTERVAL, default=current_scan_interval
-                    ): SCAN_INTERVAL_VALIDATOR,
-                    vol.Optional(
-                        CONF_CONSIDER_HOME, default=current_consider_home
-                    ): CONSIDER_HOME_VALIDATOR,
-                    vol.Optional(
-                        CONF_RSSI_LIMIT, default=current_rssi_limit
-                    ): RSSI_VALIDATOR,
-                }
-            ),
-        )
-
-    async def async_step_devices(
-        self, user_input: dict[str, object] | None = None
-    ) -> ConfigFlowResult:
-        """Pick which routed devices get a device_tracker entity.
-
-        Built from what the router actually reports right now (connected
-        clients and named static-IP reservations) instead of asking the user
-        to type MAC addresses blind, so they can recognize devices by name/IP
-        the same way the router's own admin page shows them.
-        """
         config_entry = getattr(self, "config_entry", self._provided_config_entry)
 
         if user_input is not None:
-            data = {
-                **self._pending_options,
-                CONF_TRACKED_MACS: user_input[CONF_TRACKED_MACS],
-            }
-            return self.async_create_entry(title="", data=data)
+            return self.async_create_entry(
+                title="", data={CONF_TRACKED_MACS: user_input[CONF_TRACKED_MACS]}
+            )
 
         currently_tracked = set(config_entry.options.get(CONF_TRACKED_MACS, []))
-        choices = self._device_choices(config_entry, currently_tracked)
+        coordinator = self.hass.data.get(DOMAIN, {}).get(config_entry.entry_id)
+        choices = _build_device_choices(
+            coordinator.data if coordinator else None, currently_tracked
+        )
 
         return self.async_show_form(
-            step_id="devices",
+            step_id="init",
             data_schema=vol.Schema(
                 {
                     vol.Optional(
@@ -266,28 +298,3 @@ class IptimeTrackerOptionsFlow(OptionsFlow):
                 }
             ),
         )
-
-    def _device_choices(
-        self, config_entry: ConfigEntry, currently_tracked: set[str]
-    ) -> dict[str, str]:
-        coordinator = self.hass.data.get(DOMAIN, {}).get(config_entry.entry_id)
-        data = coordinator.data if coordinator else None
-        choices: dict[str, str] = {}
-        if data:
-            for client in data.connected_clients:
-                if not client.mac:
-                    continue
-                label = client.hostname or client.mac
-                detail = f"{label} ({client.ip or '?'}, {client.mac}) - 접속중"
-                choices[client.mac] = detail
-            for lease in data.static_leases:
-                if not lease.mac or lease.mac in choices:
-                    continue
-                label = lease.hostname or lease.mac
-                choices[lease.mac] = f"{label} ({lease.ip or '?'}, {lease.mac}) - 고정IP"
-        # A device selected earlier that's now offline and has no static
-        # lease would otherwise vanish from the choices entirely, silently
-        # dropping it from cv.multi_select's default when the form re-renders.
-        for mac in currently_tracked:
-            choices.setdefault(mac, f"{mac} - 오프라인")
-        return choices
