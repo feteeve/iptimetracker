@@ -13,7 +13,7 @@ from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
-from .const import CONF_TRACKED_MACS, DOMAIN
+from .const import CONF_TRACKED_MACS, CONSIDER_HOME, DOMAIN
 from .coordinator import (
     DhcpLease,
     IptimeDataUpdateCoordinator,
@@ -79,12 +79,12 @@ async def async_setup_entry(
 class IptimeDeviceTracker(
     CoordinatorEntity[IptimeDataUpdateCoordinator], ScannerEntity, RestoreEntity
 ):
-    """Track a device's raw online/offline state on the ipTIME router.
+    """Track a device's presence on the ipTIME router.
 
-    No presence smoothing (grace period, "consider home") is applied here -
-    this reflects exactly what the router reports on the latest poll. Any
-    flapping tolerance is expected to be handled by the user's own
-    automations on top of this state.
+    A device that briefly drops off the client list (Wi-Fi power save, a
+    weak-signal hiccup) is kept "home" for CONSIDER_HOME seconds instead of
+    flipping to "away" immediately, to avoid presence flapping - matching
+    Home Assistant's own historical device_tracker default (180s).
     """
 
     _attr_source_type = SourceType.ROUTER
@@ -145,7 +145,9 @@ class IptimeDeviceTracker(
         if self._client is not None:
             self._last_seen = dt_util.utcnow()
             return True
-        return False
+        if self._last_seen is None:
+            return False
+        return (dt_util.utcnow() - self._last_seen).total_seconds() < CONSIDER_HOME
 
     @property
     def mac_address(self) -> str:
