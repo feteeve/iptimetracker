@@ -13,19 +13,14 @@ from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
-from .const import (
-    AVAILABILITY_GRACE,
-    CONF_DEVICE_NICKNAMES,
-    CONF_TRACKED_MACS,
-    CONSIDER_HOME,
-    DOMAIN,
-)
+from .const import CONF_DEVICE_NICKNAMES, CONF_TRACKED_MACS, CONSIDER_HOME, DOMAIN
 from .coordinator import (
     DhcpLease,
     IptimeDataUpdateCoordinator,
     StaticLease,
     WirelessClient,
 )
+from .entity import GracefulAvailabilityMixin
 
 _LOGGER = logging.getLogger(__name__)
 _MAC_UNIQUE_ID_PATTERN = re.compile(
@@ -99,7 +94,10 @@ async def async_setup_entry(
 
 
 class IptimeDeviceTracker(
-    CoordinatorEntity[IptimeDataUpdateCoordinator], ScannerEntity, RestoreEntity
+    GracefulAvailabilityMixin,
+    CoordinatorEntity[IptimeDataUpdateCoordinator],
+    ScannerEntity,
+    RestoreEntity,
 ):
     """Track a device's presence on the ipTIME router.
 
@@ -124,7 +122,6 @@ class IptimeDeviceTracker(
         self._attr_unique_id = _unique_id(entry, mac)
         self._last_seen: datetime | None = None
         self._last_known_name: str | None = None
-        self._unavailable_since: datetime | None = None
 
     @property
     def unique_id(self) -> str:
@@ -173,22 +170,10 @@ class IptimeDeviceTracker(
         )
 
     @property
-    def available(self) -> bool:
-        """Tolerate a brief coordinator failure instead of flapping unavailable.
-
-        CoordinatorEntity's default ties availability 1:1 to the last poll's
-        success, so a single transient hiccup (session expiry, router
-        timeout) would mark every entity unavailable immediately - bypassing
-        the CONSIDER_HOME grace period below entirely. Unavailable is only
-        reported once failures persist past AVAILABILITY_GRACE.
-        """
-        if self.coordinator.last_update_success:
-            self._unavailable_since = None
-            return True
-        now = dt_util.utcnow()
-        if self._unavailable_since is None:
-            self._unavailable_since = now
-        return (now - self._unavailable_since).total_seconds() < AVAILABILITY_GRACE
+    def _is_healthy(self) -> bool:
+        # A failed poll would otherwise bypass the CONSIDER_HOME grace below
+        # entirely - see GracefulAvailabilityMixin.
+        return self.coordinator.last_update_success
 
     @property
     def is_connected(self) -> bool:

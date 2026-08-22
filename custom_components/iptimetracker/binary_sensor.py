@@ -12,6 +12,7 @@ from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN
 from .coordinator import IptimeDataUpdateCoordinator
+from .entity import GracefulAvailabilityMixin
 
 
 async def async_setup_entry(
@@ -29,7 +30,9 @@ async def async_setup_entry(
 
 
 class IptimeWanLinkBinarySensor(
-    CoordinatorEntity[IptimeDataUpdateCoordinator], BinarySensorEntity
+    GracefulAvailabilityMixin,
+    CoordinatorEntity[IptimeDataUpdateCoordinator],
+    BinarySensorEntity,
 ):
     """Physical link state of the router's WAN (internet) port.
 
@@ -38,6 +41,13 @@ class IptimeWanLinkBinarySensor(
     points at the ISP/modem side rather than any one device on the network.
     Unavailable (not off) on firmware this integration can't query WAN link
     state on yet, so it never reports a false "down".
+
+    wan_link comes back None both when a poll fails outright and when the
+    WAN-status sub-request specifically errors out (see
+    IptimeClient.get_wan_link_status) even though the main poll succeeded -
+    either way that's "we don't know yet", not "the link is down", so it
+    gets the same grace period as a failed poll instead of flapping
+    unavailable on every such hiccup.
     """
 
     _attr_device_class = BinarySensorDeviceClass.CONNECTIVITY
@@ -50,8 +60,11 @@ class IptimeWanLinkBinarySensor(
         self._attr_unique_id = f"{DOMAIN}_{entry.entry_id}_wan_link"
 
     @property
-    def available(self) -> bool:
-        return super().available and self.coordinator.data.wan_link is not None
+    def _is_healthy(self) -> bool:
+        return (
+            self.coordinator.last_update_success
+            and self.coordinator.data.wan_link is not None
+        )
 
     @property
     def is_on(self) -> bool | None:

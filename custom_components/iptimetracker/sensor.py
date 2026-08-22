@@ -15,6 +15,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 from .coordinator import IptimeDataUpdateCoordinator
+from .entity import GracefulAvailabilityMixin
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -34,7 +35,9 @@ async def async_setup_entry(
 
 
 class IptimeWanLinkSpeedSensor(
-    CoordinatorEntity[IptimeDataUpdateCoordinator], SensorEntity
+    GracefulAvailabilityMixin,
+    CoordinatorEntity[IptimeDataUpdateCoordinator],
+    SensorEntity,
 ):
     """Negotiated link speed of the router's WAN (internet) port.
 
@@ -55,9 +58,21 @@ class IptimeWanLinkSpeedSensor(
         self._attr_unique_id = f"{DOMAIN}_{entry.entry_id}_wan_link_speed"
 
     @property
+    def _is_healthy(self) -> bool:
+        return (
+            self.coordinator.last_update_success
+            and self.coordinator.data.wan_link is not None
+        )
+
+    @property
     def available(self) -> bool:
         wan = self.coordinator.data.wan_link
-        return super().available and wan is not None and wan.connected
+        if wan is not None and not wan.connected:
+            # A confirmed "no link" report, not a comms hiccup - no speed to
+            # show, so this one goes unavailable immediately rather than
+            # waiting out the grace period below.
+            return False
+        return super().available
 
     @property
     def native_value(self) -> int | None:
