@@ -13,7 +13,7 @@ from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
-from .const import CONF_TRACKED_MACS, CONSIDER_HOME, DOMAIN
+from .const import AVAILABILITY_GRACE, CONF_TRACKED_MACS, CONSIDER_HOME, DOMAIN
 from .coordinator import (
     DhcpLease,
     IptimeDataUpdateCoordinator,
@@ -96,6 +96,8 @@ class IptimeDeviceTracker(
         self._mac = mac
         self._attr_unique_id = _unique_id(entry, mac)
         self._last_seen: datetime | None = None
+        self._last_known_name: str | None = None
+        self._unavailable_since: datetime | None = None
 
     @property
     def unique_id(self) -> str:
@@ -110,6 +112,9 @@ class IptimeDeviceTracker(
         last_seen = previous_state.attributes.get("last_seen")
         if isinstance(last_seen, str):
             self._last_seen = dt_util.parse_datetime(last_seen)
+        device_name = previous_state.attributes.get("device_name")
+        if isinstance(device_name, str) and device_name and device_name != self._mac:
+            self._last_known_name = device_name
 
     @property
     def _client(self) -> WirelessClient | None:
@@ -141,6 +146,24 @@ class IptimeDeviceTracker(
         )
 
     @property
+    def available(self) -> bool:
+        """Tolerate a brief coordinator failure instead of flapping unavailable.
+
+        CoordinatorEntity's default ties availability 1:1 to the last poll's
+        success, so a single transient hiccup (session expiry, router
+        timeout) would mark every entity unavailable immediately - bypassing
+        the CONSIDER_HOME grace period below entirely. Unavailable is only
+        reported once failures persist past AVAILABILITY_GRACE.
+        """
+        if self.coordinator.last_update_success:
+            self._unavailable_since = None
+            return True
+        now = dt_util.utcnow()
+        if self._unavailable_since is None:
+            self._unavailable_since = now
+        return (now - self._unavailable_since).total_seconds() < AVAILABILITY_GRACE
+
+    @property
     def is_connected(self) -> bool:
         if self._client is not None:
             self._last_seen = dt_util.utcnow()
@@ -159,11 +182,18 @@ class IptimeDeviceTracker(
         # Keep the device-reported/DHCP hostname separate from the
         # administrator-assigned static reservation name.
         if c and c.hostname and c.hostname != self._mac:
+            self._last_known_name = c.hostname
             return c.hostname
         lease = self._dhcp_lease
         if lease and lease.hostname and lease.hostname != self._mac:
+            self._last_known_name = lease.hostname
             return lease.hostname
-        return self._mac
+        # The device isn't in this poll's client list (offline, or just
+        # outside CONSIDER_HOME) - dhcp_leases/static_leases aren't wired up
+        # yet on this firmware, so without this cache the name would revert
+        # to the bare MAC the instant a device drops off, even while
+        # is_connected still reports it "home".
+        return self._last_known_name or self._mac
 
     @property
     def reservation_name(self) -> str | None:

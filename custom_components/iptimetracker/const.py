@@ -14,3 +14,4 @@ DEFAULT_USERNAME = "admin"
 SCAN_INTERVAL = 30  # seconds between router polls
 RSSI_LIMIT = -90  # dBm; only applied to EasyMesh satellite stations
 CONSIDER_HOME = 180  # seconds a device stays "home" after it drops off the client list
+AVAILABILITY_GRACE = 60  # seconds a coordinator poll failure is tolerated before entities report unavailable
