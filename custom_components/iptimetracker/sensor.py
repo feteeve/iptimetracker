@@ -13,7 +13,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN
+from .const import DOMAIN, entity_unique_id
 from .coordinator import IptimeDataUpdateCoordinator
 from .entity import GracefulAvailabilityMixin
 
@@ -55,7 +55,7 @@ class IptimeWanLinkSpeedSensor(
         self, coordinator: IptimeDataUpdateCoordinator, entry: ConfigEntry
     ) -> None:
         super().__init__(coordinator)
-        self._attr_unique_id = f"{DOMAIN}_{entry.entry_id}_wan_link_speed"
+        self._attr_unique_id = entity_unique_id(entry, "wan_link_speed")
 
     @property
     def _is_healthy(self) -> bool:
@@ -100,7 +100,15 @@ class IptimeMeshStationCountSensor(
         self, coordinator: IptimeDataUpdateCoordinator, entry: ConfigEntry
     ) -> None:
         super().__init__(coordinator)
-        self._attr_unique_id = f"{DOMAIN}_{entry.entry_id}_mesh_station_count"
+        self._attr_unique_id = entity_unique_id(entry, "mesh_station_count")
+
+    @property
+    def available(self) -> bool:
+        data = self.coordinator.data
+        return (
+            self.coordinator.last_update_success
+            and (not data.mesh_enabled or data.mesh_topology_available)
+        )
 
     @property
     def native_value(self) -> int | None:
@@ -109,4 +117,8 @@ class IptimeMeshStationCountSensor(
 
     @property
     def extra_state_attributes(self) -> dict:
-        return {"mesh_enabled": self.coordinator.data.mesh_enabled}
+        data = self.coordinator.data
+        return {
+            "mesh_enabled": data.mesh_enabled,
+            "topology_available": data.mesh_topology_available,
+        }

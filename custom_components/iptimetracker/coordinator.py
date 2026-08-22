@@ -86,6 +86,7 @@ class WanLinkStatus:
 @dataclass
 class IptimeData:
     connected_clients: list[WirelessClient] = field(default_factory=list)
+    router_clients: list[WirelessClient] = field(default_factory=list)
     wireless_clients: list[WirelessClient] = field(default_factory=list)
     # The router's JSON admin API has no confirmed endpoint for DHCP leases
     # or static-IP reservations yet, so these stay empty for now rather than
@@ -95,6 +96,7 @@ class IptimeData:
     wan_link: WanLinkStatus | None = None
     mesh_enabled: bool = False
     mesh_clients: list[WirelessClient] = field(default_factory=list)
+    mesh_topology_available: bool = True
 
 
 class IptimeClient:
@@ -150,6 +152,7 @@ class IptimeClient:
         self._session: aiohttp.ClientSession | None = None
         self._logged_in = False
         self._mesh_enabled = False
+        self._last_mesh_clients: list[WirelessClient] = []
 
     _SCHEME_PREFIX_PATTERN = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://")
 
@@ -217,6 +220,8 @@ class IptimeClient:
             ) as response:
                 text = await response.text(errors="replace")
                 if response.status >= 400:
+                    if response.status in (401, 403):
+                        self._logged_in = False
                     raise UpdateFailed(f"ipTIME HTTP 오류 {response.status} ({path})")
                 return response, text
         except (aiohttp.ClientError, TimeoutError) as err:
@@ -230,7 +235,6 @@ class IptimeClient:
         to anything else, since there's only one login path.
         """
         self._logged_in = False
-        self._mesh_enabled = False
 
         last_err: UpdateFailed | None = None
         for attempt in (1, 2):
@@ -253,9 +257,6 @@ class IptimeClient:
             raise last_err or UpdateFailed("ipTIME 로그인에 실패했습니다")
 
         _LOGGER.info("ipTIME 로그인 성공 (%s)", self._base_url)
-        self._mesh_enabled = await self._detect_mesh_enabled()
-        if self._mesh_enabled:
-            _LOGGER.info("ipTIME EasyMesh 감지됨: 위성 기기도 함께 추적합니다")
         return True
 
     async def _login_request(self) -> bool:
@@ -267,9 +268,10 @@ class IptimeClient:
         self._logged_in = bool(payload.get("result"))
         if not self._logged_in:
             error = payload.get("error") or {}
-            if error.get("code") == -31997:
+            code = error.get("code") if isinstance(error, dict) else None
+            if code == -31997:
                 raise IptimeCaptchaRequired("ipTIME 관리자 CAPTCHA 인증이 활성화되어 있습니다")
-            if error.get("code") == -31996:
+            if code == -31996:
                 raise IptimeAuthenticationError("ipTIME 관리자 계정이 올바르지 않습니다")
             raise UpdateFailed(f"ipTIME 로그인 API 오류: {error}")
 
@@ -300,6 +302,18 @@ class IptimeClient:
         try:
             payload = json.loads(text)
         except ValueError as err:
+            # Some firmware redirects an expired session to an HTML login
+            # page instead of returning a JSON authentication error.
+            if retry_on_auth:
+                _LOGGER.debug(
+                    "ipTIME non-JSON response for %s; refreshing session once",
+                    method_name,
+                )
+                self._logged_in = False
+                await self._login_request()
+                return await self._request_json(
+                    method_name, params, retry_on_auth=False
+                )
             raise UpdateFailed(f"ipTIME JSON 응답 해석 실패 ({method_name})") from err
         if not isinstance(payload, dict):
             raise UpdateFailed(f"ipTIME JSON 응답 형식 오류 ({method_name})")
@@ -319,16 +333,23 @@ class IptimeClient:
         error = payload.get("error")
         if not error:
             return False
-        code = error.get("code")
-        message = str(error.get("message") or "").lower()
-        return code == -31998 or any(word in message for word in ("session", "login", "auth"))
+        if isinstance(error, dict):
+            code = error.get("code")
+            message = str(error.get("message") or "").lower()
+        else:
+            code = None
+            message = str(error).lower()
+        return code == -31998 or any(
+            word in message for word in ("session", "login", "auth")
+        )
 
     async def get_wireless_clients(self) -> list[WirelessClient]:
         _, payload = await self._request_json("network/interface/lan/stations")
         result = payload.get("result")
         if result is None:
             error = payload.get("error") or {}
-            if error.get("code") == -31998:
+            code = error.get("code") if isinstance(error, dict) else None
+            if code == -31998:
                 self._logged_in = False
                 raise IptimeSessionExpired("ipTIME 세션이 만료되었습니다")
             raise UpdateFailed(f"ipTIME 접속자 조회 실패: {error}")
@@ -342,8 +363,12 @@ class IptimeClient:
             if not isinstance(device, dict):
                 continue
             connection = device.get("connection") or {}
+            if not isinstance(connection, dict):
+                connection = {}
             connection_type = str(connection.get("type") or "unknown")
             details = connection.get(connection_type) or {}
+            if not isinstance(details, dict):
+                details = {}
             if connection_type == "wireless":
                 bss = str(details.get("bss", "wireless"))
                 interface = {
@@ -356,6 +381,8 @@ class IptimeClient:
                 interface = connection_type
                 rssi = None
             info = device.get("info") or {}
+            if not isinstance(info, dict):
+                info = {}
             mac = self._normalize_mac(str(device.get("mac", "")))
             name = self._name_from_mappings(mac, info, device)
             if not name and mac:
@@ -373,15 +400,35 @@ class IptimeClient:
         self._log_json_name_diagnostics(source="stations", entries=result)
         return [client for client in clients if client.mac]
 
-    async def _detect_mesh_enabled(self) -> bool:
+    async def _detect_mesh_enabled(self) -> bool | None:
         """Whether this router has EasyMesh active (a topology query is only useful then)."""
         try:
-            _, payload = await self._request_json("easymesh/info", retry_on_auth=False)
+            _, payload = await self._request_json("easymesh/info")
             result = payload.get("result") or {}
-            return bool(result.get("active"))
+            if not isinstance(result, dict) or "active" not in result:
+                return None
+            active = result["active"]
+            if isinstance(active, bool):
+                return active
+            if isinstance(active, int):
+                return active != 0
+            normalized = str(active).strip().casefold()
+            if normalized in {"1", "true", "yes", "on", "active", "enabled"}:
+                return True
+            if normalized in {
+                "0",
+                "false",
+                "no",
+                "off",
+                "inactive",
+                "disabled",
+                "",
+            }:
+                return False
+            return None
         except UpdateFailed as err:
             _LOGGER.debug("ipTIME EasyMesh 감지 실패(정상: 메쉬 미사용 공유기일 수 있음): %s", err)
-            return False
+            return None
 
     async def get_wan_link_status(self) -> WanLinkStatus | None:
         """Physical link state of the WAN port, confirmed against the
@@ -434,7 +481,7 @@ class IptimeClient:
             raw=str(link),
         )
 
-    async def get_mesh_clients(self, rssi_limit: int) -> list[WirelessClient]:
+    async def get_mesh_clients(self, rssi_limit: int) -> list[WirelessClient] | None:
         """Devices connected to EasyMesh satellite units, filtered by RSSI."""
         if not self._mesh_enabled:
             return []
@@ -443,16 +490,30 @@ class IptimeClient:
             data = json.loads(text)
         except (UpdateFailed, ValueError) as err:
             _LOGGER.debug("ipTIME EasyMesh 위성기기 조회 실패: %s", err)
-            return []
+            return None
+
+        if not isinstance(data, dict):
+            _LOGGER.debug(
+                "ipTIME EasyMesh topology response is %s, not an object",
+                type(data).__name__,
+            )
+            return None
+        stations = data.get("station") or []
+        if not isinstance(stations, list):
+            _LOGGER.debug("ipTIME EasyMesh station response is not a list")
+            return None
 
         clients: list[WirelessClient] = []
-        for station in data.get("station") or []:
+        for station in stations:
             if not isinstance(station, dict):
                 continue
             mac = self._normalize_mac(str(station.get("mac") or ""))
             if not mac:
                 continue
-            if str(station.get("connection") or "").strip() in {"Unknown", "WIRED"}:
+            if str(station.get("connection") or "").strip().casefold() in {
+                "unknown",
+                "wired",
+            }:
                 continue
             rssi = self._as_int(station.get("rssi"))
             if rssi is not None and rssi < rssi_limit:
@@ -530,7 +591,27 @@ class IptimeClient:
             await self.login()  # raises with the specific reason if this fails too
             wireless = await self.get_wireless_clients()
 
-        mesh = await self.get_mesh_clients(rssi_limit) if self._mesh_enabled else []
+        detected_mesh = await self._detect_mesh_enabled()
+        if detected_mesh is not None:
+            if self._mesh_enabled and not detected_mesh:
+                self._last_mesh_clients = []
+            self._mesh_enabled = detected_mesh
+
+        mesh_topology_available = True
+        if self._mesh_enabled:
+            mesh_result = await self.get_mesh_clients(rssi_limit)
+            if mesh_result is None:
+                # A failed topology request means "unknown", not "zero
+                # stations". Retain the last good set to avoid false-away
+                # transitions and expose the partial failure to entities.
+                mesh_topology_available = False
+                mesh = list(self._last_mesh_clients)
+            else:
+                mesh = mesh_result
+                self._last_mesh_clients = list(mesh)
+        else:
+            mesh = []
+            self._last_mesh_clients = []
         wan_link = await self.get_wan_link_status()
         connected = {client.mac: client for client in wireless}
         # EasyMesh satellite stations aren't visible to the main router's own
@@ -558,12 +639,14 @@ class IptimeClient:
         )
         return IptimeData(
             connected_clients=connected_clients,
+            router_clients=wireless,
             wireless_clients=wireless_clients,
             dhcp_leases=[],
             static_leases=[],
             wan_link=wan_link,
             mesh_enabled=self._mesh_enabled,
             mesh_clients=mesh,
+            mesh_topology_available=mesh_topology_available,
         )
 
     @classmethod

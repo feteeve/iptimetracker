@@ -134,9 +134,10 @@ def _duplicate_nickname(nicknames: dict[str, str]) -> str | None:
     for name in nicknames.values():
         if not name:
             continue
-        if name in seen:
+        normalized = name.casefold()
+        if normalized in seen:
             return name
-        seen.add(name)
+        seen.add(normalized)
     return None
 
 

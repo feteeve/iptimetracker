@@ -96,6 +96,16 @@ class IptimeClientHelperTest(unittest.TestCase):
         self.assertEqual(client._clean_name("wired", "AA:BB:CC:DD:EE:FF"), "")
         self.assertEqual(client._clean_name("거실 TV", "AA:BB:CC:DD:EE:FF"), "거실 TV")
 
+    def test_unauthorized_detection_accepts_string_errors(self) -> None:
+        self.assertTrue(
+            coordinator.IptimeClient._looks_unauthorized(
+                {"error": "Session expired; login required"}
+            )
+        )
+        self.assertFalse(
+            coordinator.IptimeClient._looks_unauthorized({"error": "bad request"})
+        )
+
 
 class IptimeClientAsyncTest(unittest.IsolatedAsyncioTestCase):
     async def test_login_request_raises_auth_error_without_retry(self) -> None:
@@ -208,10 +218,67 @@ class IptimeClientAsyncTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(coordinator.UpdateFailed):
             await client.get_wireless_clients()
 
+    async def test_get_wireless_clients_tolerates_malformed_nested_fields(self) -> None:
+        client = coordinator.IptimeClient.__new__(coordinator.IptimeClient)
+        client._request_json = AsyncMock(
+            return_value=(
+                SimpleNamespace(),
+                {
+                    "result": [
+                        {
+                            "mac": "aa:bb:cc:dd:ee:ff",
+                            "info": "unexpected",
+                            "connection": "unexpected",
+                        }
+                    ]
+                },
+            )
+        )
+        clients = await client.get_wireless_clients()
+        self.assertEqual(len(clients), 1)
+        self.assertEqual(clients[0].interface, "unknown")
+        self.assertEqual(clients[0].ip, "")
+
+    async def test_non_json_api_response_reauthenticates_once(self) -> None:
+        client = coordinator.IptimeClient.__new__(coordinator.IptimeClient)
+        client._logged_in = True
+        client._login_request = AsyncMock(return_value=True)
+        client._request_text = AsyncMock(
+            side_effect=[
+                (SimpleNamespace(), "<html>login</html>"),
+                (SimpleNamespace(), '{"result": []}'),
+            ]
+        )
+
+        _, payload = await client._request_json("network/interface/lan/stations")
+
+        self.assertEqual(payload, {"result": []})
+        client._login_request.assert_awaited_once()
+        self.assertEqual(client._request_text.await_count, 2)
+
+    async def test_malformed_mesh_topology_is_unknown_not_empty(self) -> None:
+        client = coordinator.IptimeClient.__new__(coordinator.IptimeClient)
+        client._mesh_enabled = True
+        client._request_text = AsyncMock(
+            return_value=(SimpleNamespace(), '["unexpected"]')
+        )
+
+        self.assertIsNone(await client.get_mesh_clients(-90))
+
+    async def test_mesh_detection_parses_string_boolean(self) -> None:
+        client = coordinator.IptimeClient.__new__(coordinator.IptimeClient)
+        client._request_json = AsyncMock(
+            return_value=(SimpleNamespace(), {"result": {"active": "0"}})
+        )
+
+        self.assertFalse(await client._detect_mesh_enabled())
+
     async def test_fetch_all_merges_mesh_clients_and_returns_empty_leases(self) -> None:
         client = coordinator.IptimeClient.__new__(coordinator.IptimeClient)
         client._logged_in = True
         client._mesh_enabled = True
+        client._last_mesh_clients = []
+        client._detect_mesh_enabled = AsyncMock(return_value=True)
         client.get_wireless_clients = AsyncMock(
             return_value=[
                 coordinator.WirelessClient(
@@ -241,6 +308,28 @@ class IptimeClientAsyncTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(data.dhcp_leases, [])
         self.assertEqual(data.static_leases, [])
         client.get_mesh_clients.assert_awaited_once()
+
+    async def test_fetch_all_retains_mesh_clients_when_topology_fails(self) -> None:
+        client = coordinator.IptimeClient.__new__(coordinator.IptimeClient)
+        cached = coordinator.WirelessClient(
+            mac="11:22:33:44:55:66",
+            ip="192.168.0.60",
+            hostname="mesh-client",
+            interface="mesh-sta",
+        )
+        client._logged_in = True
+        client._mesh_enabled = True
+        client._last_mesh_clients = [cached]
+        client._detect_mesh_enabled = AsyncMock(return_value=None)
+        client.get_wireless_clients = AsyncMock(return_value=[])
+        client.get_mesh_clients = AsyncMock(return_value=None)
+        client.get_wan_link_status = AsyncMock(return_value=None)
+
+        data = await client.fetch_all()
+
+        self.assertFalse(data.mesh_topology_available)
+        self.assertEqual(data.mesh_clients, [cached])
+        self.assertEqual(data.connected_clients, [cached])
 
 
 if __name__ == "__main__":

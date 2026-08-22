@@ -5,6 +5,7 @@ import logging
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
 
 from .const import CONF_HOST, CONF_PASSWORD, CONF_USERNAME, DOMAIN
 from .coordinator import IptimeClient, IptimeDataUpdateCoordinator
@@ -31,11 +32,33 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
 
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    _migrate_entity_unique_ids(hass, entry)
+    try:
+        await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    except Exception:
+        hass.data[DOMAIN].pop(entry.entry_id, None)
+        await client.close()
+        raise
 
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
 
     return True
+
+
+def _migrate_entity_unique_ids(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Replace entry-id-scoped entity IDs with stable router-scoped IDs."""
+    old_prefix = f"{DOMAIN}_{entry.entry_id}_"
+    stable_scope = entry.unique_id or entry.data[CONF_HOST]
+    registry = er.async_get(hass)
+    for registry_entry in er.async_entries_for_config_entry(registry, entry.entry_id):
+        if registry_entry.platform != DOMAIN:
+            continue
+        if not registry_entry.unique_id.startswith(old_prefix):
+            continue
+        registry.async_update_entity(
+            registry_entry.entity_id,
+            new_unique_id=f"{stable_scope}_{registry_entry.unique_id[len(old_prefix):]}",
+        )
 
 
 async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

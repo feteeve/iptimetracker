@@ -10,7 +10,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
-from .const import DOMAIN
+from .const import DOMAIN, entity_unique_id
 from .coordinator import IptimeDataUpdateCoordinator
 from .entity import GracefulAvailabilityMixin
 
@@ -57,7 +57,7 @@ class IptimeWanLinkBinarySensor(
         self, coordinator: IptimeDataUpdateCoordinator, entry: ConfigEntry
     ) -> None:
         super().__init__(coordinator)
-        self._attr_unique_id = f"{DOMAIN}_{entry.entry_id}_wan_link"
+        self._attr_unique_id = entity_unique_id(entry, "wan_link")
 
     @property
     def _is_healthy(self) -> bool:
@@ -110,7 +110,7 @@ class IptimeRouterConnectivityBinarySensor(
         self, coordinator: IptimeDataUpdateCoordinator, entry: ConfigEntry
     ) -> None:
         super().__init__(coordinator)
-        self._attr_unique_id = f"{DOMAIN}_{entry.entry_id}_router_connectivity"
+        self._attr_unique_id = entity_unique_id(entry, "router_connectivity")
         self._last_success: datetime | None = None
 
     @property

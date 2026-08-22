@@ -13,7 +13,13 @@ from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
-from .const import CONF_DEVICE_NICKNAMES, CONF_TRACKED_MACS, CONSIDER_HOME, DOMAIN
+from .const import (
+    CONF_DEVICE_NICKNAMES,
+    CONF_TRACKED_MACS,
+    CONSIDER_HOME,
+    DOMAIN,
+    entity_unique_id,
+)
 from .coordinator import (
     DhcpLease,
     IptimeDataUpdateCoordinator,
@@ -29,7 +35,7 @@ _MAC_UNIQUE_ID_PATTERN = re.compile(
 
 
 def _unique_id(entry: ConfigEntry, mac: str) -> str:
-    return f"{DOMAIN}_{entry.entry_id}_{mac.replace(':', '_')}"
+    return entity_unique_id(entry, mac.replace(":", "_"))
 
 
 def _mac_from_unique_id(unique_id: str) -> str | None:
@@ -76,14 +82,14 @@ async def async_setup_entry(
             registry.async_update_entity(
                 registry_entry.entity_id, new_unique_id=expected_unique_id
             )
-        # Push a newly-picked nickname onto an entity that already exists
-        # (entity_id itself is left alone here - renaming that silently
-        # could break existing automations/dashboards; re-picking the
-        # device in the picker after unchecking it regenerates a fresh
-        # entity_id from the nickname instead).
-        nickname = nicknames.get(mac)
-        if nickname and registry_entry.name != nickname:
-            registry.async_update_entity(registry_entry.entity_id, name=nickname)
+        # Older releases wrote the integration nickname into the registry's
+        # user-controlled name override. Clear only an unchanged generated
+        # value; a real user rename differs from original_name and is kept.
+        if (
+            registry_entry.name is not None
+            and registry_entry.name == registry_entry.original_name
+        ):
+            registry.async_update_entity(registry_entry.entity_id, name=None)
 
     async_add_entities(
         [
@@ -173,7 +179,14 @@ class IptimeDeviceTracker(
     def _is_healthy(self) -> bool:
         # A failed poll would otherwise bypass the CONSIDER_HOME grace below
         # entirely - see GracefulAvailabilityMixin.
-        return self.coordinator.last_update_success
+        if not self.coordinator.last_update_success:
+            return False
+        data = self.coordinator.data
+        if data.mesh_topology_available:
+            return True
+        # The main router list remains authoritative for directly connected
+        # and absent non-mesh clients. Only a cached mesh client is unknown.
+        return not any(client.mac == self._mac for client in data.mesh_clients)
 
     @property
     def is_connected(self) -> bool:
