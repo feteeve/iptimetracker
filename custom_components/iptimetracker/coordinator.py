@@ -93,6 +93,8 @@ class IptimeData:
     dhcp_leases: list[DhcpLease] = field(default_factory=list)
     static_leases: list[StaticLease] = field(default_factory=list)
     wan_link: WanLinkStatus | None = None
+    mesh_enabled: bool = False
+    mesh_clients: list[WirelessClient] = field(default_factory=list)
 
 
 class IptimeClient:
@@ -560,6 +562,8 @@ class IptimeClient:
             dhcp_leases=[],
             static_leases=[],
             wan_link=wan_link,
+            mesh_enabled=self._mesh_enabled,
+            mesh_clients=mesh,
         )
 
     @classmethod

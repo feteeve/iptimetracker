@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import logging
 
-from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
+from homeassistant.components.sensor import (
+    SensorDeviceClass,
+    SensorEntity,
+    SensorStateClass,
+)
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import UnitOfDataRate
+from homeassistant.const import EntityCategory, UnitOfDataRate
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -21,7 +25,12 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     coordinator: IptimeDataUpdateCoordinator = hass.data[DOMAIN][entry.entry_id]
-    async_add_entities([IptimeWanLinkSpeedSensor(coordinator, entry)])
+    async_add_entities(
+        [
+            IptimeWanLinkSpeedSensor(coordinator, entry),
+            IptimeMeshStationCountSensor(coordinator, entry),
+        ]
+    )
 
 
 class IptimeWanLinkSpeedSensor(
@@ -54,3 +63,35 @@ class IptimeWanLinkSpeedSensor(
     def native_value(self) -> int | None:
         wan = self.coordinator.data.wan_link
         return wan.speed_mbps if wan else None
+
+
+class IptimeMeshStationCountSensor(
+    CoordinatorEntity[IptimeDataUpdateCoordinator], SensorEntity
+):
+    """How many EasyMesh satellite stations are currently reporting in.
+
+    None (not 0) when EasyMesh isn't active on this router at all, so a
+    router that has never used mesh reads differently from one where mesh
+    is on but every satellite has dropped off.
+    """
+
+    _attr_name = "ipTIME 이지메시 위성 기기 수"
+    _attr_native_unit_of_measurement = "대"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:access-point-network"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(
+        self, coordinator: IptimeDataUpdateCoordinator, entry: ConfigEntry
+    ) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{DOMAIN}_{entry.entry_id}_mesh_station_count"
+
+    @property
+    def native_value(self) -> int | None:
+        data = self.coordinator.data
+        return len(data.mesh_clients) if data.mesh_enabled else None
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        return {"mesh_enabled": self.coordinator.data.mesh_enabled}
