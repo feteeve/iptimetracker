@@ -25,19 +25,49 @@
   "options": {
     "step": {
       "init": {
-        "title": "추적 기기 관리",
-        "description": "위 목록은 새로 추적에 추가할 기기입니다 (공유기에 현재 접속 중이거나 고정IP로 이름이 등록된 기기 중, 아직 추적하지 않는 것만 표시). 아래는 현재 추적 중인 기기입니다 - 순서대로 IP - MAC (기기명, 닉네임):\n{tracked_list}\n\n각 기기 옆 칸에 닉네임을 입력하거나 수정할 수 있고, 체크박스를 선택하면 그 기기의 추적을 완전히 해제합니다(엔티티 삭제).",
-        "data": {
-          "tracked_macs": "새로 추가할 기기"
+        "title": "기기 추적 설정",
+        "description": "현재 {tracked_count}개 기기를 추적하고 있습니다. 원하는 작업을 선택하세요.",
+        "menu_options": {
+          "add_select": "새 기기 추가",
+          "manage_select": "추적 중인 기기 편집 · 삭제"
         }
       },
-      "nicknames": {
-        "title": "기기 이름 지정",
-        "description": "방금 선택한 기기입니다: 순서대로 IP - MAC 주소.\n{device_list}\n\n각 항목에 원하는 이름을 입력하세요. 공유기가 이미 이름을 알고 있으면 미리 채워져 있습니다. 비워두면 공유기에서 보고하는 이름(없으면 MAC 주소)이 계속 사용됩니다."
+      "add_select": {
+        "title": "추가할 기기 선택",
+        "description": "공유기에 현재 접속 중이거나 고정 IP로 이름이 등록된 기기 중, 아직 추적하지 않는 것만 표시됩니다. 추가할 기기를 하나 이상 선택하세요.",
+        "data": {
+          "tracked_macs": "추가할 기기"
+        }
+      },
+      "add_nickname": {
+        "title": "기기 이름 정하기 ({position}/{total})",
+        "description": "IP: {ip}\nMAC 주소: {mac}\n공유기가 보고하는 이름: {reported_name}\n\n이 기기에서 사용할 이름을 입력하세요. 비워두면 공유기가 보고하는 이름(없으면 MAC 주소)이 계속 사용됩니다.",
+        "data": {
+          "nickname": "이름"
+        }
+      },
+      "manage_select": {
+        "title": "편집할 기기 선택",
+        "description": "현재 {tracked_count}개 기기를 추적하고 있습니다. 이름을 바꾸거나 추적을 중지할 기기를 선택하세요. 모두 마쳤으면 완료를 선택해 저장하세요.",
+        "data": {
+          "device": "기기"
+        }
+      },
+      "edit_device": {
+        "title": "기기 편집",
+        "description": "IP: {ip}\nMAC 주소: {mac}\n공유기가 보고하는 이름: {reported_name}",
+        "data": {
+          "nickname": "이름",
+          "remove": "이 기기 추적 중지 (엔티티 삭제)"
+        }
       }
     },
     "error": {
-      "duplicate_nickname": "이미 다른 기기에서 사용 중인 이름입니다: {nickname}. 서로 다른 이름을 입력하세요."
+      "duplicate_nickname": "이미 다른 기기에서 사용 중인 이름입니다: {nickname}. 서로 다른 이름을 입력하세요.",
+      "select_at_least_one": "추가할 기기를 하나 이상 선택하세요."
+    },
+    "abort": {
+      "no_addable_devices": "추가할 수 있는 새 기기가 없습니다. 공유기에 연결되어 있거나 고정 IP로 이름이 등록된 기기 중, 아직 추적하지 않는 기기가 없습니다."
     }
   }
 }

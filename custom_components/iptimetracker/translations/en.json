@@ -25,19 +25,49 @@
   "options": {
     "step": {
       "init": {
-        "title": "Manage tracked devices",
-        "description": "The list above is for adding new devices to track (only devices the router currently reports, that aren't already tracked, are shown). Below are the devices you're already tracking - in order, IP - MAC (device name, nickname):\n{tracked_list}\n\nEdit a device's nickname in the field next to it, or check its box to stop tracking it entirely (removes its entity).",
+        "title": "Device tracking settings",
+        "description": "You're currently tracking {tracked_count} device(s). Choose what you'd like to do.",
+        "menu_options": {
+          "add_select": "Add a new device",
+          "manage_select": "Edit or remove tracked devices"
+        }
+      },
+      "add_select": {
+        "title": "Choose devices to add",
+        "description": "Only devices the router currently reports - connected now, or with a named static-IP reservation - that aren't already tracked are shown. Select one or more devices to add.",
         "data": {
           "tracked_macs": "Devices to add"
         }
       },
-      "nicknames": {
-        "title": "Name your devices",
-        "description": "Devices you just selected, in order (IP - MAC address):\n{device_list}\n\nEnter the name you want for each one. Pre-filled when the router already knows a name. Leave blank to keep using the router-reported name (or the MAC address if it has none)."
+      "add_nickname": {
+        "title": "Name this device ({position}/{total})",
+        "description": "IP: {ip}\nMAC address: {mac}\nRouter-reported name: {reported_name}\n\nEnter the name you want for this device. Leave blank to keep using the router-reported name (or the MAC address if it has none).",
+        "data": {
+          "nickname": "Name"
+        }
+      },
+      "manage_select": {
+        "title": "Choose a device to edit",
+        "description": "You're currently tracking {tracked_count} device(s). Pick one to rename or stop tracking. Choose Done when you're finished to save your changes.",
+        "data": {
+          "device": "Device"
+        }
+      },
+      "edit_device": {
+        "title": "Edit device",
+        "description": "IP: {ip}\nMAC address: {mac}\nRouter-reported name: {reported_name}",
+        "data": {
+          "nickname": "Name",
+          "remove": "Stop tracking this device (removes its entity)"
+        }
       }
     },
     "error": {
-      "duplicate_nickname": "This name is already used by another device: {nickname}. Enter a different name."
+      "duplicate_nickname": "This name is already used by another device: {nickname}. Enter a different name.",
+      "select_at_least_one": "Select at least one device to add."
+    },
+    "abort": {
+      "no_addable_devices": "There are no new devices to add. There's nothing currently connected or reserved with a static IP that isn't already tracked."
     }
   }
 }
