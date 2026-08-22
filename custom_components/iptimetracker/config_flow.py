@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 from urllib.parse import urlsplit
 
 import voluptuous as vol
@@ -15,6 +16,7 @@ except ImportError:  # pragma: no cover - depends on the HA version installed
     from homeassistant.components.ssdp import SsdpServiceInfo
 
 from .const import (
+    CONF_DEVICE_NICKNAMES,
     CONF_HOST,
     CONF_PASSWORD,
     CONF_TRACKED_MACS,
@@ -41,13 +43,14 @@ def _ip_sort_key(ip: str) -> tuple[int, ...]:
     return parts if len(parts) == 4 else (999, 999, 999, 999)
 
 
-def _build_device_choices(data: object, currently_tracked: set[str]) -> dict[str, str]:
-    """List known devices while keeping reported and reservation names distinct.
+def _collect_device_info(data: object, currently_tracked: set[str]) -> dict[str, dict[str, str]]:
+    """Gather per-MAC display info, keeping reported and reservation names distinct.
 
     Sourced from live connected clients and named static-IP reservations,
     sorted by IP. A previously selected device that isn't in either list
     right now is kept (as offline) so picking it again doesn't require it
-    to reconnect first.
+    to reconnect first. Shared by the device picker and the nickname step
+    so both agree on what the router currently calls each device.
     """
     entries: dict[str, dict[str, str]] = {}
     if data is not None:
@@ -93,10 +96,17 @@ def _build_device_choices(data: object, currently_tracked: set[str]) -> dict[str
                 "reservation_confidence": "",
             },
         )
+    return dict(sorted(entries.items(), key=lambda item: _ip_sort_key(item[1]["ip"])))
 
+
+def _suggested_name(info: dict[str, str]) -> str:
+    """The router-reported name to pre-fill a nickname field with, if any."""
+    return info["reservation_name"] or info["device_name"] or ""
+
+
+def _build_device_choices(entries: dict[str, dict[str, str]]) -> dict[str, str]:
     choices: dict[str, str] = {}
-    ordered = sorted(entries.items(), key=lambda item: _ip_sort_key(item[1]["ip"]))
-    for mac, info in ordered:
+    for mac, info in entries.items():
         device_name = info["device_name"]
         reservation_name = info["reservation_name"]
         reservation_label = (
@@ -270,6 +280,7 @@ class IptimeTrackerOptionsFlow(OptionsFlow):
     def __init__(self, config_entry: ConfigEntry) -> None:
         # Keep compatibility with HA releases predating OptionsFlow.config_entry.
         self._provided_config_entry = config_entry
+        self._selected_macs: list[str] = []
 
     async def async_step_init(
         self, user_input: dict[str, object] | None = None
@@ -277,15 +288,15 @@ class IptimeTrackerOptionsFlow(OptionsFlow):
         config_entry = getattr(self, "config_entry", self._provided_config_entry)
 
         if user_input is not None:
-            return self.async_create_entry(
-                title="", data={CONF_TRACKED_MACS: user_input[CONF_TRACKED_MACS]}
-            )
+            self._selected_macs = list(user_input[CONF_TRACKED_MACS])
+            return await self.async_step_nicknames()
 
         currently_tracked = set(config_entry.options.get(CONF_TRACKED_MACS, []))
         coordinator = self.hass.data.get(DOMAIN, {}).get(config_entry.entry_id)
-        choices = _build_device_choices(
+        device_info = _collect_device_info(
             coordinator.data if coordinator else None, currently_tracked
         )
+        choices = _build_device_choices(device_info)
 
         return self.async_show_form(
             step_id="init",
@@ -297,4 +308,63 @@ class IptimeTrackerOptionsFlow(OptionsFlow):
                     ): cv.multi_select(choices)
                 }
             ),
+        )
+
+    async def async_step_nicknames(
+        self, user_input: dict[str, str] | None = None
+    ) -> ConfigFlowResult:
+        """Let the user override the name each just-picked device shows as.
+
+        Pre-filled with whatever the router currently reports (or the
+        previously saved nickname), left blank when nothing is known yet -
+        the field is optional, so leaving it blank keeps using the live
+        router-reported name instead.
+        """
+        config_entry = getattr(self, "config_entry", self._provided_config_entry)
+
+        if user_input is not None:
+            nicknames = {
+                mac: name.strip() for mac, name in user_input.items() if name.strip()
+            }
+            return self.async_create_entry(
+                title="",
+                data={
+                    CONF_TRACKED_MACS: self._selected_macs,
+                    CONF_DEVICE_NICKNAMES: nicknames,
+                },
+            )
+
+        if not self._selected_macs:
+            return self.async_create_entry(
+                title="",
+                data={CONF_TRACKED_MACS: [], CONF_DEVICE_NICKNAMES: {}},
+            )
+
+        existing_nicknames: dict[str, str] = config_entry.options.get(
+            CONF_DEVICE_NICKNAMES, {}
+        )
+        coordinator = self.hass.data.get(DOMAIN, {}).get(config_entry.entry_id)
+        device_info = _collect_device_info(
+            coordinator.data if coordinator else None, set(self._selected_macs)
+        )
+
+        empty_info = {
+            "ip": "",
+            "device_name": "",
+            "reservation_name": "",
+            "static_ip": "",
+            "reservation_confidence": "",
+        }
+        schema_dict: dict[Any, type[str]] = {}
+        device_lines = []
+        for mac in self._selected_macs:
+            info = device_info.get(mac, empty_info)
+            default = existing_nicknames.get(mac) or _suggested_name(info)
+            schema_dict[vol.Optional(mac, default=default)] = str
+            device_lines.append(f"{info['ip'] or '?'} - {mac}")
+
+        return self.async_show_form(
+            step_id="nicknames",
+            data_schema=vol.Schema(schema_dict),
+            description_placeholders={"device_list": "\n".join(device_lines)},
         )

@@ -30,6 +30,10 @@
         "data": {
           "tracked_macs": "Devices to track"
         }
+      },
+      "nicknames": {
+        "title": "Name your devices",
+        "description": "Devices you just selected, in order (IP - MAC address):\n{device_list}\n\nEnter the name you want for each one. Pre-filled when the router already knows a name. Leave blank to keep using the router-reported name (or the MAC address if it has none)."
       }
     }
   }

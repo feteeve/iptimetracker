@@ -4,6 +4,7 @@ CONF_HOST = "host"
 CONF_USERNAME = "username"
 CONF_PASSWORD = "password"
 CONF_TRACKED_MACS = "tracked_macs"
+CONF_DEVICE_NICKNAMES = "device_nicknames"
 
 DEFAULT_HOST = "192.168.0.1"
 DEFAULT_USERNAME = "admin"

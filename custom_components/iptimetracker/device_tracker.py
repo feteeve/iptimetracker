@@ -13,7 +13,13 @@ from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
-from .const import AVAILABILITY_GRACE, CONF_TRACKED_MACS, CONSIDER_HOME, DOMAIN
+from .const import (
+    AVAILABILITY_GRACE,
+    CONF_DEVICE_NICKNAMES,
+    CONF_TRACKED_MACS,
+    CONSIDER_HOME,
+    DOMAIN,
+)
 from .coordinator import (
     DhcpLease,
     IptimeDataUpdateCoordinator,
@@ -54,6 +60,11 @@ async def async_setup_entry(
     allowed_macs: set[str] = {
         mac.upper() for mac in entry.options.get(CONF_TRACKED_MACS, [])
     }
+    nicknames: dict[str, str] = {
+        mac.upper(): name
+        for mac, name in entry.options.get(CONF_DEVICE_NICKNAMES, {}).items()
+        if name
+    }
 
     registry = er.async_get(hass)
     for registry_entry in er.async_entries_for_config_entry(registry, entry.entry_id):
@@ -70,9 +81,20 @@ async def async_setup_entry(
             registry.async_update_entity(
                 registry_entry.entity_id, new_unique_id=expected_unique_id
             )
+        # Push a newly-picked nickname onto an entity that already exists
+        # (entity_id itself is left alone here - renaming that silently
+        # could break existing automations/dashboards; re-picking the
+        # device in the picker after unchecking it regenerates a fresh
+        # entity_id from the nickname instead).
+        nickname = nicknames.get(mac)
+        if nickname and registry_entry.name != nickname:
+            registry.async_update_entity(registry_entry.entity_id, name=nickname)
 
     async_add_entities(
-        [IptimeDeviceTracker(coordinator, entry, mac) for mac in sorted(allowed_macs)]
+        [
+            IptimeDeviceTracker(coordinator, entry, mac, nicknames.get(mac))
+            for mac in sorted(allowed_macs)
+        ]
     )
 
 
@@ -90,10 +112,15 @@ class IptimeDeviceTracker(
     _attr_source_type = SourceType.ROUTER
 
     def __init__(
-        self, coordinator: IptimeDataUpdateCoordinator, entry: ConfigEntry, mac: str
+        self,
+        coordinator: IptimeDataUpdateCoordinator,
+        entry: ConfigEntry,
+        mac: str,
+        nickname: str | None = None,
     ) -> None:
         super().__init__(coordinator)
         self._mac = mac
+        self._nickname = nickname
         self._attr_unique_id = _unique_id(entry, mac)
         self._last_seen: datetime | None = None
         self._last_known_name: str | None = None
@@ -227,7 +254,7 @@ class IptimeDeviceTracker(
 
     @property
     def name(self) -> str:
-        return self.reservation_name or self.hostname or self._mac
+        return self._nickname or self.reservation_name or self.hostname or self._mac
 
     @property
     def ip_address(self) -> str | None:
@@ -260,7 +287,10 @@ class IptimeDeviceTracker(
             reservation_source, reservation_confidence = self.reservation_name_source
             attrs["reservation_name_source"] = reservation_source
             attrs["reservation_name_confidence"] = reservation_confidence
-        if reservation_name:
+        if self._nickname:
+            attrs["nickname"] = self._nickname
+            attrs["name_source"] = "nickname"
+        elif reservation_name:
             attrs["name_source"] = "static_reservation"
         elif device_name and device_name != self._mac:
             attrs["name_source"] = "device_or_dhcp"
