@@ -25,16 +25,19 @@
   "options": {
     "step": {
       "init": {
-        "title": "Choose devices to track",
-        "description": "Devices currently connected to the router, or named static-IP reservations. Only selected devices get a device_tracker entity; unchecking a previously selected device removes its entity too.",
+        "title": "Manage tracked devices",
+        "description": "The list above is for adding new devices to track (only devices the router currently reports, that aren't already tracked, are shown). Below are the devices you're already tracking - in order, IP - MAC (device name, nickname):\n{tracked_list}\n\nEdit a device's nickname in the field next to it, or check its box to stop tracking it entirely (removes its entity).",
         "data": {
-          "tracked_macs": "Devices to track"
+          "tracked_macs": "Devices to add"
         }
       },
       "nicknames": {
         "title": "Name your devices",
         "description": "Devices you just selected, in order (IP - MAC address):\n{device_list}\n\nEnter the name you want for each one. Pre-filled when the router already knows a name. Leave blank to keep using the router-reported name (or the MAC address if it has none)."
       }
+    },
+    "error": {
+      "duplicate_nickname": "This name is already used by another device: {nickname}. Enter a different name."
     }
   }
 }

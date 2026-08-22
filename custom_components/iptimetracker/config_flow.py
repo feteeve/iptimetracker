@@ -104,6 +104,42 @@ def _suggested_name(info: dict[str, str]) -> str:
     return info["reservation_name"] or info["device_name"] or ""
 
 
+_EMPTY_DEVICE_INFO: dict[str, str] = {
+    "ip": "",
+    "device_name": "",
+    "reservation_name": "",
+    "static_ip": "",
+    "reservation_confidence": "",
+}
+_NICKNAME_FIELD_PREFIX = "nickname::"
+_REMOVE_FIELD_PREFIX = "remove::"
+
+
+def _nickname_field(mac: str) -> str:
+    return f"{_NICKNAME_FIELD_PREFIX}{mac}"
+
+
+def _remove_field(mac: str) -> str:
+    return f"{_REMOVE_FIELD_PREFIX}{mac}"
+
+
+def _duplicate_nickname(nicknames: dict[str, str]) -> str | None:
+    """First nickname value used by more than one device, if any (blanks ignored).
+
+    Two devices sharing a nickname would otherwise collide on the same
+    entity_id/display name and get silently disambiguated by Home Assistant
+    (e.g. an auto-appended "_2") - better to catch it before saving.
+    """
+    seen: set[str] = set()
+    for name in nicknames.values():
+        if not name:
+            continue
+        if name in seen:
+            return name
+        seen.add(name)
+    return None
+
+
 def _build_device_choices(entries: dict[str, dict[str, str]]) -> dict[str, str]:
     choices: dict[str, str] = {}
     for mac, info in entries.items():
@@ -271,100 +307,192 @@ class IptimeTrackerConfigFlow(ConfigFlow, domain=DOMAIN):
 class IptimeTrackerOptionsFlow(OptionsFlow):
     """Pick which routed devices get a device_tracker entity.
 
-    This is the only options step: opening the integration's settings goes
-    straight to the device picker, built from what the router reports right
-    now (connected clients and named static-IP reservations) instead of
-    asking the user to type MAC addresses blind.
+    The single "init" screen doubles as both: a picker (multi-select, choices
+    limited to devices *not* already tracked) for adding new devices, and a
+    list of already-tracked devices with an editable nickname field and a
+    "remove" checkbox each - removal is explicit there, not implied by
+    unchecking a box, so a device already being tracked never disappears by
+    accident. Adding new devices continues into a "nicknames" step (since
+    which boxes got checked isn't known until this form is submitted).
     """
 
     def __init__(self, config_entry: ConfigEntry) -> None:
         # Keep compatibility with HA releases predating OptionsFlow.config_entry.
         self._provided_config_entry = config_entry
         self._selected_macs: list[str] = []
+        self._pending_tracked_macs: list[str] = []
+        self._pending_nicknames: dict[str, str] = {}
+
+    @property
+    def _entry(self) -> ConfigEntry:
+        return getattr(self, "config_entry", self._provided_config_entry)
 
     async def async_step_init(
         self, user_input: dict[str, object] | None = None
     ) -> ConfigFlowResult:
-        config_entry = getattr(self, "config_entry", self._provided_config_entry)
+        tracked_macs = list(self._entry.options.get(CONF_TRACKED_MACS, []))
+        current_nicknames: dict[str, str] = self._entry.options.get(
+            CONF_DEVICE_NICKNAMES, {}
+        )
 
         if user_input is not None:
-            self._selected_macs = list(user_input[CONF_TRACKED_MACS])
-            return await self.async_step_nicknames()
+            kept_macs = [
+                mac for mac in tracked_macs if not user_input.get(_remove_field(mac))
+            ]
+            updated_nicknames = {
+                mac: nickname
+                for mac in kept_macs
+                if (nickname := user_input.get(_nickname_field(mac), "").strip())
+            }
+            duplicate = _duplicate_nickname(updated_nicknames)
+            if duplicate:
+                return await self._show_init_form(
+                    tracked_macs,
+                    current_nicknames,
+                    errors={"base": "duplicate_nickname"},
+                    error_placeholders={"nickname": duplicate},
+                    field_overrides=user_input,
+                )
 
-        currently_tracked = set(config_entry.options.get(CONF_TRACKED_MACS, []))
-        coordinator = self.hass.data.get(DOMAIN, {}).get(config_entry.entry_id)
+            newly_selected = [
+                mac
+                for mac in user_input.get(CONF_TRACKED_MACS, [])
+                if mac not in kept_macs
+            ]
+            if newly_selected:
+                self._pending_tracked_macs = kept_macs
+                self._pending_nicknames = updated_nicknames
+                self._selected_macs = newly_selected
+                return await self.async_step_nicknames()
+
+            return self.async_create_entry(
+                title="",
+                data={
+                    CONF_TRACKED_MACS: kept_macs,
+                    CONF_DEVICE_NICKNAMES: updated_nicknames,
+                },
+            )
+
+        return await self._show_init_form(tracked_macs, current_nicknames)
+
+    async def _show_init_form(
+        self,
+        tracked_macs: list[str],
+        current_nicknames: dict[str, str],
+        *,
+        errors: dict[str, str] | None = None,
+        error_placeholders: dict[str, str] | None = None,
+        field_overrides: dict[str, object] | None = None,
+    ) -> ConfigFlowResult:
+        """`field_overrides` re-applies a just-rejected submission's raw values
+        (e.g. after a duplicate-nickname error) so the user doesn't have to
+        retype everything."""
+        tracked_set = set(tracked_macs)
+        coordinator = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id)
         device_info = _collect_device_info(
-            coordinator.data if coordinator else None, currently_tracked
+            coordinator.data if coordinator else None, tracked_set
         )
-        choices = _build_device_choices(device_info)
+        addable_choices = {
+            mac: label
+            for mac, label in _build_device_choices(device_info).items()
+            if mac not in tracked_set
+        }
+
+        schema_dict: dict[Any, Any] = {
+            vol.Optional(
+                CONF_TRACKED_MACS,
+                default=(field_overrides or {}).get(CONF_TRACKED_MACS, []),
+            ): cv.multi_select(addable_choices),
+        }
+        tracked_lines = []
+        for mac in tracked_macs:
+            info = device_info.get(mac, _EMPTY_DEVICE_INFO)
+            nickname = current_nicknames.get(mac, "")
+            nickname_default = (
+                (field_overrides or {}).get(_nickname_field(mac), nickname)
+                if field_overrides
+                else nickname
+            )
+            remove_default = bool(
+                (field_overrides or {}).get(_remove_field(mac), False)
+            )
+            schema_dict[
+                vol.Optional(_nickname_field(mac), default=nickname_default)
+            ] = str
+            schema_dict[vol.Optional(_remove_field(mac), default=remove_default)] = bool
+            device_name = _suggested_name(info) or "이름 없음"
+            tracked_lines.append(
+                f"{info['ip'] or '?'} - {mac} (기기명: {device_name}, "
+                f"닉네임: {nickname or '-'})"
+            )
 
         return self.async_show_form(
             step_id="init",
-            data_schema=vol.Schema(
-                {
-                    vol.Optional(
-                        CONF_TRACKED_MACS,
-                        default=[mac for mac in currently_tracked if mac in choices],
-                    ): cv.multi_select(choices)
-                }
-            ),
+            data_schema=vol.Schema(schema_dict),
+            errors=errors or {},
+            description_placeholders={
+                "tracked_list": "\n".join(tracked_lines) if tracked_lines else "없음",
+                **(error_placeholders or {}),
+            },
         )
 
     async def async_step_nicknames(
         self, user_input: dict[str, str] | None = None
     ) -> ConfigFlowResult:
-        """Let the user override the name each just-picked device shows as.
+        """Name the devices just newly selected on the init screen.
 
-        Pre-filled with whatever the router currently reports (or the
-        previously saved nickname), left blank when nothing is known yet -
-        the field is optional, so leaving it blank keeps using the live
-        router-reported name instead.
+        Pre-filled with whatever the router currently reports, left blank
+        when nothing is known yet - the field is optional, so leaving it
+        blank keeps using the live router-reported name instead.
         """
-        config_entry = getattr(self, "config_entry", self._provided_config_entry)
-
         if user_input is not None:
-            nicknames = {
+            new_nicknames = {
                 mac: name.strip() for mac, name in user_input.items() if name.strip()
             }
+            merged_nicknames = {**self._pending_nicknames, **new_nicknames}
+            duplicate = _duplicate_nickname(merged_nicknames)
+            if duplicate:
+                return await self._show_nicknames_form(
+                    errors={"base": "duplicate_nickname"},
+                    error_placeholders={"nickname": duplicate},
+                    field_overrides=user_input,
+                )
             return self.async_create_entry(
                 title="",
                 data={
-                    CONF_TRACKED_MACS: self._selected_macs,
-                    CONF_DEVICE_NICKNAMES: nicknames,
+                    CONF_TRACKED_MACS: self._pending_tracked_macs + self._selected_macs,
+                    CONF_DEVICE_NICKNAMES: merged_nicknames,
                 },
             )
 
-        if not self._selected_macs:
-            return self.async_create_entry(
-                title="",
-                data={CONF_TRACKED_MACS: [], CONF_DEVICE_NICKNAMES: {}},
-            )
+        return await self._show_nicknames_form()
 
-        existing_nicknames: dict[str, str] = config_entry.options.get(
-            CONF_DEVICE_NICKNAMES, {}
-        )
-        coordinator = self.hass.data.get(DOMAIN, {}).get(config_entry.entry_id)
+    async def _show_nicknames_form(
+        self,
+        *,
+        errors: dict[str, str] | None = None,
+        error_placeholders: dict[str, str] | None = None,
+        field_overrides: dict[str, str] | None = None,
+    ) -> ConfigFlowResult:
+        coordinator = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id)
         device_info = _collect_device_info(
             coordinator.data if coordinator else None, set(self._selected_macs)
         )
 
-        empty_info = {
-            "ip": "",
-            "device_name": "",
-            "reservation_name": "",
-            "static_ip": "",
-            "reservation_confidence": "",
-        }
         schema_dict: dict[Any, type[str]] = {}
         device_lines = []
         for mac in self._selected_macs:
-            info = device_info.get(mac, empty_info)
-            default = existing_nicknames.get(mac) or _suggested_name(info)
+            info = device_info.get(mac, _EMPTY_DEVICE_INFO)
+            default = (field_overrides or {}).get(mac, _suggested_name(info))
             schema_dict[vol.Optional(mac, default=default)] = str
             device_lines.append(f"{info['ip'] or '?'} - {mac}")
 
         return self.async_show_form(
             step_id="nicknames",
             data_schema=vol.Schema(schema_dict),
-            description_placeholders={"device_list": "\n".join(device_lines)},
+            errors=errors or {},
+            description_placeholders={
+                "device_list": "\n".join(device_lines),
+                **(error_placeholders or {}),
+            },
         )
