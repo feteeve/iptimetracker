@@ -29,7 +29,8 @@
         "description": "You're currently tracking {tracked_count} device(s). Choose what you'd like to do.",
         "menu_options": {
           "add_select": "Add a new device",
-          "manage_select": "Edit or remove tracked devices"
+          "manage_select": "Edit or remove tracked devices",
+          "settings": "Settings (away detection delay)"
         }
       },
       "add_select": {
@@ -59,6 +60,13 @@
         "data": {
           "nickname": "Name",
           "remove": "Stop tracking this device (removes its entity)"
+        }
+      },
+      "settings": {
+        "title": "Away detection delay",
+        "description": "How long to wait after a device drops off the router's client list before marking it \"away\". Too short and a brief signal drop can flap the state; too long delays detecting that someone left.",
+        "data": {
+          "consider_home": "Away detection delay"
         }
       }
     },

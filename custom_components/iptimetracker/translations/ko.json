@@ -29,7 +29,8 @@
         "description": "현재 {tracked_count}개 기기를 추적하고 있습니다. 원하는 작업을 선택하세요.",
         "menu_options": {
           "add_select": "새 기기 추가",
-          "manage_select": "추적 중인 기기 편집 · 삭제"
+          "manage_select": "추적 중인 기기 편집 · 삭제",
+          "settings": "설정 (away 판정 시간)"
         }
       },
       "add_select": {
@@ -59,6 +60,13 @@
         "data": {
           "nickname": "이름",
           "remove": "이 기기 추적 중지 (엔티티 삭제)"
+        }
+      },
+      "settings": {
+        "title": "away 판정 시간 설정",
+        "description": "기기가 공유기 접속 목록에서 사라진 뒤, 실제로 \"away\"로 표시되기까지 기다리는 시간입니다. 너무 짧으면 신호가 잠깐 끊길 때마다 상태가 깜빡일 수 있고, 너무 길면 외출을 늦게 감지합니다.",
+        "data": {
+          "consider_home": "away 판정 대기 시간"
         }
       }
     },

@@ -14,9 +14,10 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
 from .const import (
+    CONF_CONSIDER_HOME,
     CONF_DEVICE_NICKNAMES,
     CONF_TRACKED_MACS,
-    CONSIDER_HOME,
+    DEFAULT_CONSIDER_HOME,
     DOMAIN,
     entity_unique_id,
 )
@@ -108,9 +109,11 @@ class IptimeDeviceTracker(
     """Track a device's presence on the ipTIME router.
 
     A device that briefly drops off the client list (Wi-Fi power save, a
-    weak-signal hiccup) is kept "home" for CONSIDER_HOME seconds instead of
+    weak-signal hiccup) is kept "home" for a grace period instead of
     flipping to "away" immediately, to avoid presence flapping - matching
-    Home Assistant's own historical device_tracker default (180s).
+    Home Assistant's own historical device_tracker default (180s). That
+    grace period is user-configurable via options (⚙️ > settings), see
+    CONF_CONSIDER_HOME.
     """
 
     _attr_source_type = SourceType.ROUTER
@@ -123,6 +126,7 @@ class IptimeDeviceTracker(
         nickname: str | None = None,
     ) -> None:
         super().__init__(coordinator)
+        self._entry = entry
         self._mac = mac
         self._nickname = nickname
         self._attr_unique_id = _unique_id(entry, mac)
@@ -195,7 +199,10 @@ class IptimeDeviceTracker(
             return True
         if self._last_seen is None:
             return False
-        return (dt_util.utcnow() - self._last_seen).total_seconds() < CONSIDER_HOME
+        consider_home = self._entry.options.get(
+            CONF_CONSIDER_HOME, DEFAULT_CONSIDER_HOME
+        )
+        return (dt_util.utcnow() - self._last_seen).total_seconds() < consider_home
 
     @property
     def mac_address(self) -> str:

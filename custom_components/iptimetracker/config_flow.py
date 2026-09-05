@@ -21,11 +21,14 @@ except ImportError:  # pragma: no cover - depends on the HA version installed
     from homeassistant.components.ssdp import SsdpServiceInfo
 
 from .const import (
+    CONF_CONSIDER_HOME,
     CONF_DEVICE_NICKNAMES,
     CONF_HOST,
     CONF_PASSWORD,
     CONF_TRACKED_MACS,
     CONF_USERNAME,
+    CONSIDER_HOME_PRESETS,
+    DEFAULT_CONSIDER_HOME,
     DEFAULT_HOST,
     DEFAULT_USERNAME,
     DOMAIN,
@@ -169,6 +172,15 @@ def _tracked_device_label(mac: str, info: dict[str, str], nickname: str) -> str:
     nickname (falling back to whatever the router reports)."""
     name = nickname or _reported_name_label(info)
     return f"{name} · {info['ip'] or '?'} · {mac}"
+
+
+def _duration_label(seconds: int, language: str) -> str:
+    """Label for a whole-minute/second duration in the HA UI's own language."""
+    korean = language.lower().startswith("ko")
+    if seconds % 60 == 0:
+        minutes = seconds // 60
+        return f"{minutes}분" if korean else f"{minutes} min"
+    return f"{seconds}초" if korean else f"{seconds} sec"
 
 
 def _user_schema(*, default_host: str) -> vol.Schema:
@@ -348,6 +360,7 @@ class IptimeTrackerOptionsFlow(OptionsFlow):
         menu_options = ["add_select"]
         if tracked_count:
             menu_options.append("manage_select")
+        menu_options.append("settings")
         return self.async_show_menu(
             step_id="init",
             menu_options=menu_options,
@@ -432,6 +445,7 @@ class IptimeTrackerOptionsFlow(OptionsFlow):
                 return self.async_create_entry(
                     title="",
                     data={
+                        **self._entry.options,
                         CONF_TRACKED_MACS: tracked_macs + self._selected_macs,
                         CONF_DEVICE_NICKNAMES: {
                             **current_nicknames,
@@ -489,6 +503,7 @@ class IptimeTrackerOptionsFlow(OptionsFlow):
                 return self.async_create_entry(
                     title="",
                     data={
+                        **self._entry.options,
                         CONF_TRACKED_MACS: tracked_macs,
                         CONF_DEVICE_NICKNAMES: self._pending_nicknames,
                     },
@@ -574,4 +589,46 @@ class IptimeTrackerOptionsFlow(OptionsFlow):
                 "reported_name": _reported_name_label(info),
                 **error_placeholders,
             },
+        )
+
+    # ---- General settings -----------------------------------------------
+
+    async def async_step_settings(
+        self, user_input: dict[str, object] | None = None
+    ) -> ConfigFlowResult:
+        """Pick how long a device stays "home" after it drops off the router.
+
+        Offered as a fixed dropdown of presets rather than free entry - the
+        only thing that matters here is roughly how patient to be before
+        flipping to "away", not a precise second count.
+        """
+        current = self._entry.options.get(CONF_CONSIDER_HOME, DEFAULT_CONSIDER_HOME)
+
+        if user_input is not None:
+            return self.async_create_entry(
+                title="",
+                data={
+                    **self._entry.options,
+                    CONF_CONSIDER_HOME: int(user_input[CONF_CONSIDER_HOME]),
+                },
+            )
+
+        language = getattr(self.hass.config, "language", "en")
+        options = [
+            SelectOptionDict(value=str(seconds), label=_duration_label(seconds, language))
+            for seconds in CONSIDER_HOME_PRESETS
+        ]
+        return self.async_show_form(
+            step_id="settings",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_CONSIDER_HOME, default=str(current)
+                    ): SelectSelector(
+                        SelectSelectorConfig(
+                            options=options, mode=SelectSelectorMode.DROPDOWN
+                        )
+                    ),
+                }
+            ),
         )
