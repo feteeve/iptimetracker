@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import timedelta
 
@@ -11,6 +12,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .const import DOMAIN, SCAN_INTERVAL
+from .diagnostics import IptimeDiagnosticsClient
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -44,6 +46,8 @@ class IptimeData:
     wireless_clients: list[WirelessClient] = field(default_factory=list)
     dhcp_leases: list[DhcpLease] = field(default_factory=list)
     static_leases: list[StaticLease] = field(default_factory=list)
+    diagnostics: dict = field(default_factory=dict)
+    diagnostics_updated_at: float | None = None
 
 
 class IptimeClient:
@@ -125,8 +129,10 @@ class IptimeClient:
             try:
                 html = await self._fetch(smenu)
                 clients.extend(self._parse_wireless(html, interface))
-            except UpdateFailed:
-                pass
+            except UpdateFailed as err:
+                if "세션 만료" in str(err):
+                    raise
+                _LOGGER.debug("무선 목록 조회 실패 (%s): %s", smenu, err)
 
         return clients
 
@@ -305,6 +311,26 @@ class IptimeDataUpdateCoordinator(DataUpdateCoordinator[IptimeData]):
             update_interval=timedelta(seconds=SCAN_INTERVAL),
         )
         self.client = client
+        self.diagnostics_client = IptimeDiagnosticsClient(
+            client._base_url.removeprefix("http://"), client._username, client._password
+        )
+        self._last_diagnostics_attempt = 0.0
+        self._diagnostics: dict = {}
+        self._diagnostics_updated_at: float | None = None
 
     async def _async_update_data(self) -> IptimeData:
-        return await self.client.fetch_all()
+        data = await self.client.fetch_all()
+        now = time.monotonic()
+        if now - self._last_diagnostics_attempt >= 300 or not self._last_diagnostics_attempt:
+            self._last_diagnostics_attempt = now
+            try:
+                latest = await self.diagnostics_client.fetch()
+            except Exception:  # Optional diagnostics must never stop presence updates.
+                _LOGGER.exception("선택적 JSON 진단 조회 실패")
+                latest = {}
+            if latest:
+                self._diagnostics = latest
+                self._diagnostics_updated_at = time.time()
+        data.diagnostics = self._diagnostics
+        data.diagnostics_updated_at = self._diagnostics_updated_at
+        return data

@@ -38,5 +38,6 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if unload_ok:
         coordinator: IptimeDataUpdateCoordinator = hass.data[DOMAIN].pop(entry.entry_id)
         await coordinator.client.close()
+        await coordinator.diagnostics_client.close()
 
     return unload_ok
