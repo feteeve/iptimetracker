@@ -331,6 +331,20 @@ class IptimeClientAsyncTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(data.mesh_clients, [cached])
         self.assertEqual(data.connected_clients, [cached])
 
+    async def test_optional_diagnostics_keep_successful_fields(self) -> None:
+        client = coordinator.IptimeClient.__new__(coordinator.IptimeClient)
+
+        async def request(method: str):
+            if method == "network/dns/info":
+                raise coordinator.UpdateFailed("unsupported")
+            if method == "system/info":
+                return SimpleNamespace(), {"result": {"uptime": 123}}
+            return SimpleNamespace(), {"error": {"code": -32601}}
+
+        client._request_json = AsyncMock(side_effect=request)
+
+        self.assertEqual(await client.get_diagnostics(), {"system": {"uptime": 123}})
+
 
 if __name__ == "__main__":
     unittest.main()

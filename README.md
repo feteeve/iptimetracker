@@ -18,6 +18,8 @@ ipTIME 공유기의 관리자 API에서 현재 접속 기기를 읽어 Home Assi
   생성됩니다
 - WAN(인터넷) 포트의 물리 링크 상태/속도 — 인터넷이 안 될 때 ISP 쪽 문제인지
   구분하는 용도
+- 읽기 전용 네트워크·EasyMesh 진단 — WAN IP, DNS, 펌웨어, 업타임,
+  메시 역할과 에이전트 상태를 5분마다 조회 (지원하지 않는 항목은 생략)
 - SSDP를 통한 ipTIME 공유기 자동 발견
 
 `device_tracker`는 목록에서 사라진 뒤에도 180초(3분) 동안은 `home`으로
@@ -58,6 +60,7 @@ ipTIME 공유기의 관리자 API에서 현재 접속 기기를 읽어 Home Assi
 - `binary_sensor`: ipTIME 인터넷(WAN) 연결 — WAN 포트에 물리 링크가 없으면
   off (라우터가 아직 이 API를 지원 못 하면 off가 아니라 unavailable로 표시)
 - `sensor`: ipTIME WAN 링크 속도 (Mbps)
+- `sensor`: ipTIME 네트워크 진단, ipTIME 이지메시 진단
 
 ## 주의사항
 

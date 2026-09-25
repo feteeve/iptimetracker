@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any
@@ -97,6 +98,8 @@ class IptimeData:
     mesh_enabled: bool = False
     mesh_clients: list[WirelessClient] = field(default_factory=list)
     mesh_topology_available: bool = True
+    diagnostics: dict[str, Any] = field(default_factory=dict)
+    diagnostics_updated_at: float | None = None
 
 
 class IptimeClient:
@@ -649,6 +652,26 @@ class IptimeClient:
             mesh_topology_available=mesh_topology_available,
         )
 
+    async def get_diagnostics(self) -> dict[str, Any]:
+        """Read optional status methods with the established admin session."""
+        methods = {
+            "system": "system/info",
+            "wan": "network/interface/wan1/info",
+            "dns": "network/dns/info",
+            "firmware": "firmware/info",
+            "mesh": "easymesh/info",
+            "mesh_agents": "easymesh/show/agent",
+        }
+        result: dict[str, Any] = {}
+        for key, method in methods.items():
+            try:
+                _, payload = await self._request_json(method)
+                if payload.get("error") is None and payload.get("result") is not None:
+                    result[key] = payload["result"]
+            except UpdateFailed as err:
+                _LOGGER.debug("Optional ipTIME diagnostic %s unavailable: %s", method, err)
+        return result
+
     @classmethod
     def _normalize_mac(cls, value: str) -> str:
         match = cls._MAC_PATTERN.search(value)
@@ -686,6 +709,23 @@ class IptimeDataUpdateCoordinator(DataUpdateCoordinator[IptimeData]):
         )
         self.client = client
         self.entry = entry
+        self._diagnostics: dict[str, Any] = {}
+        self._diagnostics_updated_at: float | None = None
+        self._last_diagnostics_attempt = 0.0
 
     async def _async_update_data(self) -> IptimeData:
-        return await self.client.fetch_all(rssi_limit=RSSI_LIMIT)
+        data = await self.client.fetch_all(rssi_limit=RSSI_LIMIT)
+        now = time.monotonic()
+        if not self._last_diagnostics_attempt or now - self._last_diagnostics_attempt >= 300:
+            self._last_diagnostics_attempt = now
+            try:
+                latest = await asyncio.wait_for(self.client.get_diagnostics(), timeout=8)
+            except Exception:
+                _LOGGER.exception("Optional ipTIME diagnostics failed")
+                latest = {}
+            if latest:
+                self._diagnostics = latest
+                self._diagnostics_updated_at = time.time()
+        data.diagnostics = self._diagnostics
+        data.diagnostics_updated_at = self._diagnostics_updated_at
+        return data

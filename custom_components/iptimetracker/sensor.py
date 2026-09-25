@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import time
+from datetime import datetime, timezone
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
@@ -30,6 +32,8 @@ async def async_setup_entry(
         [
             IptimeWanLinkSpeedSensor(coordinator, entry),
             IptimeMeshStationCountSensor(coordinator, entry),
+            IptimeNetworkDiagnosticsSensor(coordinator, entry),
+            IptimeMeshDiagnosticsSensor(coordinator, entry),
         ]
     )
 
@@ -121,4 +125,92 @@ class IptimeMeshStationCountSensor(
         return {
             "mesh_enabled": data.mesh_enabled,
             "topology_available": data.mesh_topology_available,
+        }
+
+
+class IptimeNetworkDiagnosticsSensor(
+    CoordinatorEntity[IptimeDataUpdateCoordinator], SensorEntity
+):
+    """WAN and system snapshot from supported read-only JSON methods."""
+
+    _attr_name = "ipTIME 네트워크 진단"
+    _attr_icon = "mdi:router-network"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator: IptimeDataUpdateCoordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = entity_unique_id(entry, "network_diagnostics")
+
+    @property
+    def native_value(self) -> str:
+        data = self.coordinator.data
+        if not data.diagnostics:
+            return "정보 없음"
+        if data.diagnostics_updated_at and time.time() - data.diagnostics_updated_at > 600:
+            return "진단 갱신 실패"
+        wan = data.diagnostics.get("wan")
+        if isinstance(wan, dict) and wan.get("ip"):
+            return "WAN IP 할당됨"
+        return "WAN 상태 확인 필요"
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        data = self.coordinator.data
+        diagnostics = data.diagnostics
+        system = diagnostics.get("system") if isinstance(diagnostics.get("system"), dict) else {}
+        wan = diagnostics.get("wan") if isinstance(diagnostics.get("wan"), dict) else {}
+        dns = diagnostics.get("dns") if isinstance(diagnostics.get("dns"), dict) else {}
+        firmware = diagnostics.get("firmware") if isinstance(diagnostics.get("firmware"), dict) else {}
+        return {
+            "last_success": datetime.fromtimestamp(data.diagnostics_updated_at, timezone.utc).isoformat()
+            if data.diagnostics_updated_at else None,
+            "router_uptime_seconds": system.get("uptime"),
+            "wan_ip": wan.get("ip"),
+            "wan_gateway": wan.get("gateway"),
+            "wan_mac": wan.get("mac"),
+            "dns": dns,
+            "firmware": firmware.get("version"),
+        }
+
+
+class IptimeMeshDiagnosticsSensor(
+    CoordinatorEntity[IptimeDataUpdateCoordinator], SensorEntity
+):
+    """EasyMesh role and satellite status, separate from station presence."""
+
+    _attr_name = "ipTIME 이지메시 진단"
+    _attr_icon = "mdi:access-point-network"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator: IptimeDataUpdateCoordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = entity_unique_id(entry, "mesh_diagnostics")
+
+    @property
+    def native_value(self) -> str:
+        data = self.coordinator.data
+        if data.diagnostics_updated_at and time.time() - data.diagnostics_updated_at > 600:
+            return "진단 갱신 실패"
+        mesh = data.diagnostics.get("mesh")
+        if not isinstance(mesh, dict):
+            return "정보 없음"
+        if mesh.get("active") is False:
+            return "비활성"
+        return str(mesh.get("role") or mesh.get("current_role") or "활성")
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        diagnostics = self.coordinator.data.diagnostics
+        mesh = diagnostics.get("mesh") if isinstance(diagnostics.get("mesh"), dict) else {}
+        raw = diagnostics.get("mesh_agents")
+        agents = raw.get("agents", raw.get("agent", [])) if isinstance(raw, dict) else raw
+        if not isinstance(agents, list):
+            agents = []
+        return {
+            "controller_mac": mesh.get("controller_mac"),
+            "agents": [
+                {key: agent.get(key) for key in
+                 ("mac", "al_mac", "nickname", "product_name", "status", "backhaul", "connection")}
+                for agent in agents if isinstance(agent, dict)
+            ],
         }
