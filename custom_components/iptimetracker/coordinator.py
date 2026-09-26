@@ -110,6 +110,214 @@ class IptimeClient:
     MESH_STATION_PATH = "/easymesh/api.cgi?key=topology"
     WAN_LINK_METHOD = "port/link/status"
 
+    # Read-only methods observed in the iUX3 admin application. ipTIME does
+    # not publish a stable API contract, so this is deliberately an allowlist:
+    # a method must be present here and confirmed by api/has before the broad
+    # diagnostics collector calls it. No setter/action endpoint belongs here.
+    READ_ONLY_METHODS: dict[str, tuple[str, Any | None]] = {
+        "session.info": ("session/info", None),
+        "ui.pages": ("ui/pages", None),
+        "product.info": ("product/info", None),
+        "system.info": ("system/info", None),
+        "system.name": ("system/name", None),
+        "system.temperature": ("system/temperature", "cpu"),
+        "admin.account": ("admin/account", None),
+        "admin.auth": ("admin/auth", None),
+        "admin.email": ("admin/email", None),
+        "admin.changed": ("admin/changed", None),
+        "admin.email_is_set": ("admin/email/is_set", None),
+        "acl.config": ("acl/config", None),
+        "assistance.config": ("assistance/config", None),
+        "assistance.info": ("assistance/info", None),
+        "assistance.icc_config": ("assistance/icc/config", None),
+        "assistance.icc_info": ("assistance/icc/info", None),
+        "time.config": ("time/config", None),
+        "firmware.info": ("firmware/info", None),
+        "firmware.upgrade_status": ("firmware/upgrade/status", None),
+        "firmware.latest": ("firmware/version/latest", None),
+        "reboot.timer": ("reboot/timer", None),
+        "syslog.config": ("syslog/config", None),
+        "syslog.show": ("syslog/show", None),
+        "led.config": ("led/config", None),
+        "fan.config": ("fan/config", None),
+        "fan.running": ("fan/running", None),
+        "fan.original": ("fan/config/original", None),
+        "power.config": ("power/config", None),
+        "power.status": ("power/status", None),
+        "network.info": ("network/info", ["extern_addr"]),
+        "network.lan_info": ("network/interface/lan/info", None),
+        "network.lan_config": ("network/interface/lan/config", None),
+        "network.lan_stations": ("network/interface/lan/stations", None),
+        "network.lan_scan_status": ("network/interface/lan/scan/status", None),
+        "network.wan_info": ("network/interface/wan1/info", None),
+        "network.wan_config": ("network/interface/wan1/config", None),
+        "network.wan_scan_status": ("network/interface/wan1/scan/status", None),
+        "network.dns_config": ("network/dns/config", None),
+        "network.dns_info": ("network/dns/info", None),
+        "dhcp.config": ("dhcpd/config/get", "lan"),
+        "dhcp.status": ("dhcpd/status", "lan"),
+        "dhcp.leases": ("dhcpd/lease/show", "lan"),
+        "dhcp.reservations": ("dhcpd/reservedaddr/show", "lan"),
+        "routing.static": ("route/static/show", None),
+        "port.count": ("port/num", None),
+        "port.roles": ("port/role", None),
+        "port.links": ("port/link/status", None),
+        "port.stats": ("port/stat/get", None),
+        "port.link_config": ("port/link/config", None),
+        "port.link_info": ("port/link/info", None),
+        "switch.jumbo_frame": ("switch/jumbo_frame/config", None),
+        "switch.mirror": ("switch/mirror/config", None),
+        "switch.trunk": ("switch/trunk/config", None),
+        "macvlan.show": ("macvlan/show", None),
+        "iptv.config": ("iptv/config", None),
+        "wireless.info": ("wireless/info", None),
+        "wireless.band_info": ("wireless/band/info", None),
+        "wireless.band_show": ("wireless/band/show", None),
+        "wireless.band_support": ("wireless/band/support", None),
+        "wireless.band_config": ("wireless/band/config", None),
+        "wireless.bss_show": ("wireless/bss/show", None),
+        "wireless.bss_config": ("wireless/bss/config", None),
+        "wireless.channel_config": ("wireless/channel/config", None),
+        "wireless.scan": ("wireless/scan", None),
+        "wireless.clients": ("wireless/client/show", None),
+        "wireless.client_info": ("wireless/client/info", None),
+        "wireless.mac": ("wireless/mac/show", None),
+        "wireless.wps": ("wireless/wps/config", None),
+        "wireless.wps_info": ("wireless/wps/info", None),
+        "wireless.mlo": ("wireless/mlo/info", None),
+        "easymesh.info": ("easymesh/info", None),
+        "easymesh.config": ("easymesh/config", None),
+        "easymesh.agents": ("easymesh/show/agent", None),
+        "nat.config": ("nat/config", None),
+        "nat.dmz": ("dmz/config", None),
+        "nat.port_forwards": ("portforward/get", None),
+        "nat.upnp_config": ("upnp/config", None),
+        "nat.upnp_entries": ("upnp/show", None),
+        "nat.connections": ("conn/show", None),
+        "nat.connection_defaults": ("conn/defaults", None),
+        "nat.connection_info": ("conn/info", None),
+        "nat.upnp_relay": ("upnp/relay", None),
+        "security.firewall": ("firewall/get", None),
+        "security.firewall_max": ("firewall/max", None),
+        "security.dos": ("dos/config", None),
+        "security.geoip": ("geoip/get", None),
+        "security.geoip_blocked_count": ("geoip/blocked/pcount", None),
+        "security.geoip_countries": ("geoip/country/list", None),
+        "security.geoip_enabled": ("geoip/enable", None),
+        "security.geoip_allowlist": ("geoip/white/list", None),
+        "security.url": ("url/config", None),
+        "security.url_redirect": ("urlredir/config", None),
+        "qos.config": ("qos/config", None),
+        "qos.rules": ("qos/rule/show", None),
+        "qos.diffserv": ("diffserv/config", None),
+        "vpn.wireguard_server": ("wg/server/show", None),
+        "vpn.wireguard_clients": ("wg/client/show", None),
+        "vpn.wireguard_peers": ("wg/peer/show", None),
+        "vpn.pptp": ("pptp/server/config", None),
+        "vpn.l2tp": ("l2tp/server/config", None),
+        "vpn.users": ("ppp/user/show", None),
+        "vpn.servers": ("vpncli/server/list", None),
+        "vpn.status": ("vpncli/status/list", None),
+        "vpn.mudfish": ("mudfish/config", None),
+        "remote.ddns": ("ddns/config", "iptime"),
+        "remote.cwmp": ("cwmp/config", None),
+        "remote.cwmp_get": ("cwmp/get", None),
+        "remote.cwmp_status": ("cwmp/status", None),
+        "remote.snmp": ("snmp/config", None),
+        "remote.snmp_get": ("snmp/get", None),
+        "remote.snmp_trap": ("snmp/trap/get", None),
+        "usb.info": ("usb/info", None),
+        "usb.show": ("usb/show", None),
+        "usb.devices": ("usb/device/show", None),
+        "usb.mounts": ("usb/mount/list", None),
+        "usb.mode": ("usb/mode", None),
+        "usb.service_status": ("usb/service/status", None),
+        "usb.partitions": ("partition/show", None),
+        "usb.samba": ("samba/config", None),
+        "usb.ftp": ("ftp/config", None),
+        "usb.ftp_ports": ("ftp/port/list", None),
+        "usb.http": ("http/config", None),
+        "usb.media": ("media/config", None),
+        "usb.media_database": ("media/db/show", None),
+        "usb.torrent": ("torrent/config", None),
+        "usb.printer": ("cupsd/config", None),
+        "usb.printer_status": ("cupsd/status", None),
+        "usb.nas_users": ("nas/user/show", None),
+        "usb.nas_online_users": ("nas/user/show/online", None),
+        "usb.snapshots": ("snapshot/show", None),
+        "usb.btrfs": ("btrfs/info", None),
+        "usb.tethering": ("tethering/config", None),
+        "automation.routine_services": ("routine/services", None),
+        "automation.routines": ("routine/get", None),
+        "automation.routine_status": ("routine/status", None),
+        "automation.history_config": ("history/config", None),
+        "automation.history": ("history/show", None),
+        "automation.history_range": ("history/range/spec", None),
+        "automation.history_storage": ("historyd/storage/status", None),
+        "automation.hostscan_config": ("hostscan/config", None),
+        "automation.hostscan": ("hostscan/show", None),
+        "automation.hostscan_progress": ("hostscan/progressing", None),
+        "automation.hostscan_log": ("hostscan/log/read", None),
+        "automation.wol": ("wol/show", None),
+        "ui.favorites": ("ui/favorite/show", None),
+        "ui.language": ("ui/lang/config", None),
+        "ui.languages": ("ui/lang/list", None),
+    }
+
+    # The broader catalog above is retained for future targeted diagnostics,
+    # but routine manual collection intentionally stays small. These entries
+    # cover connectivity troubleshooting without querying admin accounts,
+    # remote assistance, USB/NAS, VPN, UI metadata, history or large logs.
+    SELECTED_READ_KEYS = frozenset(
+        {
+            "product.info",
+            "system.info",
+            "system.name",
+            "system.temperature",
+            "time.config",
+            "firmware.info",
+            "firmware.upgrade_status",
+            "firmware.latest",
+            "network.info",
+            "network.lan_info",
+            "network.lan_config",
+            "network.lan_stations",
+            "network.wan_info",
+            "network.wan_config",
+            "network.dns_config",
+            "network.dns_info",
+            "dhcp.config",
+            "dhcp.status",
+            "dhcp.leases",
+            "dhcp.reservations",
+            "wireless.info",
+            "wireless.band_info",
+            "wireless.band_show",
+            "wireless.band_support",
+            "wireless.bss_show",
+            "wireless.channel_config",
+            "wireless.clients",
+            "wireless.client_info",
+            "easymesh.info",
+            "easymesh.config",
+            "easymesh.agents",
+            "port.count",
+            "port.roles",
+            "port.links",
+            "port.stats",
+            "nat.config",
+            "nat.dmz",
+            "nat.port_forwards",
+            "nat.upnp_config",
+            "nat.upnp_entries",
+            "security.firewall",
+            "security.dos",
+            "remote.ddns",
+            "automation.wol",
+            "syslog.show",
+        }
+    )
+
     _LINK_SPEED_PATTERN = re.compile(r"^(\d+)([fh]?)$")
 
     _MAC_PATTERN = re.compile(r"([0-9A-Fa-f]{2}(?:[:-][0-9A-Fa-f]{2}){5})")
@@ -156,6 +364,7 @@ class IptimeClient:
         self._logged_in = False
         self._mesh_enabled = False
         self._last_mesh_clients: list[WirelessClient] = []
+        self._supported_read_methods: set[str] | None = None
 
     _SCHEME_PREFIX_PATTERN = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://")
 
@@ -653,24 +862,83 @@ class IptimeClient:
         )
 
     async def get_diagnostics(self) -> dict[str, Any]:
-        """Read optional status methods with the established admin session."""
-        methods = {
-            "system": "system/info",
-            "wan": "network/interface/wan1/info",
-            "dns": "network/dns/info",
-            "firmware": "firmware/info",
-            "mesh": "easymesh/info",
-            "mesh_agents": "easymesh/show/agent",
-        }
-        result: dict[str, Any] = {}
-        for key, method in methods.items():
+        """Read every supported allowlisted status method."""
+        supported = await self._discover_read_capabilities()
+        raw: dict[str, Any] = {}
+        for key, (method, params) in self.READ_ONLY_METHODS.items():
+            if key not in self.SELECTED_READ_KEYS:
+                continue
+            if method not in supported:
+                continue
             try:
-                _, payload = await self._request_json(method)
+                _, payload = await self._request_json(method, params)
                 if payload.get("error") is None and payload.get("result") is not None:
-                    result[key] = payload["result"]
+                    raw[key] = payload["result"]
             except UpdateFailed as err:
                 _LOGGER.debug("Optional ipTIME diagnostic %s unavailable: %s", method, err)
+        aliases = {
+            "system": "system.info",
+            "wan": "network.wan_info",
+            "dns": "network.dns_info",
+            "firmware": "firmware.info",
+            "mesh": "easymesh.info",
+            "mesh_agents": "easymesh.agents",
+        }
+        result = {
+            alias: raw[source]
+            for alias, source in aliases.items()
+            if source in raw
+        }
+        if raw:
+            result["raw"] = raw
+            result["supported_methods"] = sorted(supported)
         return result
+
+    async def _discover_read_capabilities(self) -> set[str]:
+        """Return read-only methods confirmed by the router's api/has RPC."""
+        if getattr(self, "_supported_read_methods", None) is not None:
+            return self._supported_read_methods
+
+        supported: set[str] = set()
+        capability_api_works = False
+        selected = {
+            self.READ_ONLY_METHODS[key][0]
+            for key in self.SELECTED_READ_KEYS
+        }
+        for method in sorted(selected):
+            try:
+                _, payload = await self._request_json("api/has", method)
+            except UpdateFailed as err:
+                _LOGGER.debug("ipTIME capability check failed for %s: %s", method, err)
+                continue
+            if payload.get("error") is not None:
+                continue
+            capability_api_works = True
+            value = payload.get("result")
+            if isinstance(value, dict):
+                value = value.get("has", value.get("result"))
+            if value is True or value == 1 or (
+                isinstance(value, str)
+                and value.strip().casefold() in {"1", "true", "yes"}
+            ):
+                supported.add(method)
+
+        if not capability_api_works:
+            supported = {
+                "system/info",
+                "network/interface/wan1/info",
+                "network/dns/info",
+                "firmware/info",
+                "easymesh/info",
+                "easymesh/show/agent",
+            }
+        self._supported_read_methods = supported
+        _LOGGER.info(
+            "ipTIME read-only capability discovery: %d/%d methods supported",
+            len(supported),
+            len(selected),
+        )
+        return supported
 
     @classmethod
     def _normalize_mac(cls, value: str) -> str:
@@ -711,21 +979,21 @@ class IptimeDataUpdateCoordinator(DataUpdateCoordinator[IptimeData]):
         self.entry = entry
         self._diagnostics: dict[str, Any] = {}
         self._diagnostics_updated_at: float | None = None
-        self._last_diagnostics_attempt = 0.0
 
     async def _async_update_data(self) -> IptimeData:
         data = await self.client.fetch_all(rssi_limit=RSSI_LIMIT)
-        now = time.monotonic()
-        if not self._last_diagnostics_attempt or now - self._last_diagnostics_attempt >= 300:
-            self._last_diagnostics_attempt = now
-            try:
-                latest = await asyncio.wait_for(self.client.get_diagnostics(), timeout=8)
-            except Exception:
-                _LOGGER.exception("Optional ipTIME diagnostics failed")
-                latest = {}
-            if latest:
-                self._diagnostics = latest
-                self._diagnostics_updated_at = time.time()
         data.diagnostics = self._diagnostics
         data.diagnostics_updated_at = self._diagnostics_updated_at
         return data
+
+    async def async_collect_diagnostics(self) -> None:
+        """Collect one on-demand read-only router snapshot."""
+        latest = await asyncio.wait_for(self.client.get_diagnostics(), timeout=60)
+        if not latest:
+            raise UpdateFailed("ipTIME 상세 정보 수집 결과가 없습니다")
+        self._diagnostics = latest
+        self._diagnostics_updated_at = time.time()
+        data = self.data
+        data.diagnostics = latest
+        data.diagnostics_updated_at = self._diagnostics_updated_at
+        self.async_set_updated_data(data)

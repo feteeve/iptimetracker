@@ -334,7 +334,9 @@ class IptimeClientAsyncTest(unittest.IsolatedAsyncioTestCase):
     async def test_optional_diagnostics_keep_successful_fields(self) -> None:
         client = coordinator.IptimeClient.__new__(coordinator.IptimeClient)
 
-        async def request(method: str):
+        async def request(method: str, params=None):
+            if method == "api/has":
+                return SimpleNamespace(), {"result": params == "system/info"}
             if method == "network/dns/info":
                 raise coordinator.UpdateFailed("unsupported")
             if method == "system/info":
@@ -343,7 +345,44 @@ class IptimeClientAsyncTest(unittest.IsolatedAsyncioTestCase):
 
         client._request_json = AsyncMock(side_effect=request)
 
-        self.assertEqual(await client.get_diagnostics(), {"system": {"uptime": 123}})
+        self.assertEqual(
+            await client.get_diagnostics(),
+            {
+                "system": {"uptime": 123},
+                "raw": {"system.info": {"uptime": 123}},
+                "supported_methods": ["system/info"],
+            },
+        )
+
+    async def test_capability_discovery_is_cached_and_parses_object_result(self) -> None:
+        client = coordinator.IptimeClient.__new__(coordinator.IptimeClient)
+        client._supported_read_methods = None
+
+        async def request(method: str, params=None):
+            self.assertEqual(method, "api/has")
+            return SimpleNamespace(), {"result": {"has": params == "firmware/info"}}
+
+        client._request_json = AsyncMock(side_effect=request)
+        first = await client._discover_read_capabilities()
+        second = await client._discover_read_capabilities()
+
+        self.assertIn("firmware/info", first)
+        self.assertIs(first, second)
+        self.assertEqual(
+            client._request_json.await_count,
+            len(
+                {
+                    client.READ_ONLY_METHODS[key][0]
+                    for key in client.SELECTED_READ_KEYS
+                }
+            ),
+        )
+
+    def test_manual_collection_allowlist_is_intentionally_small(self) -> None:
+        self.assertEqual(len(coordinator.IptimeClient.SELECTED_READ_KEYS), 45)
+        self.assertNotIn("admin.account", coordinator.IptimeClient.SELECTED_READ_KEYS)
+        self.assertNotIn("usb.info", coordinator.IptimeClient.SELECTED_READ_KEYS)
+        self.assertNotIn("vpn.users", coordinator.IptimeClient.SELECTED_READ_KEYS)
 
 
 if __name__ == "__main__":

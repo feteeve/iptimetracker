@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import time
 from datetime import datetime, timezone
 
 from homeassistant.components.sensor import (
@@ -34,6 +33,7 @@ async def async_setup_entry(
             IptimeMeshStationCountSensor(coordinator, entry),
             IptimeNetworkDiagnosticsSensor(coordinator, entry),
             IptimeMeshDiagnosticsSensor(coordinator, entry),
+            IptimeInformationCoverageSensor(coordinator, entry),
         ]
     )
 
@@ -146,8 +146,6 @@ class IptimeNetworkDiagnosticsSensor(
         data = self.coordinator.data
         if not data.diagnostics:
             return "정보 없음"
-        if data.diagnostics_updated_at and time.time() - data.diagnostics_updated_at > 600:
-            return "진단 갱신 실패"
         wan = data.diagnostics.get("wan")
         if isinstance(wan, dict) and wan.get("ip"):
             return "WAN IP 할당됨"
@@ -189,8 +187,6 @@ class IptimeMeshDiagnosticsSensor(
     @property
     def native_value(self) -> str:
         data = self.coordinator.data
-        if data.diagnostics_updated_at and time.time() - data.diagnostics_updated_at > 600:
-            return "진단 갱신 실패"
         mesh = data.diagnostics.get("mesh")
         if not isinstance(mesh, dict):
             return "정보 없음"
@@ -213,4 +209,43 @@ class IptimeMeshDiagnosticsSensor(
                  ("mac", "al_mac", "nickname", "product_name", "status", "backhaul", "connection")}
                 for agent in agents if isinstance(agent, dict)
             ],
+        }
+
+
+class IptimeInformationCoverageSensor(
+    CoordinatorEntity[IptimeDataUpdateCoordinator], SensorEntity
+):
+    """Number and categories of read-only APIs supported by this router."""
+
+    _attr_name = "ipTIME 정보 수집 범위"
+    _attr_icon = "mdi:database-search"
+    _attr_native_unit_of_measurement = "개"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator: IptimeDataUpdateCoordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = entity_unique_id(entry, "information_coverage")
+
+    @property
+    def available(self) -> bool:
+        return bool(self.coordinator.data.diagnostics.get("supported_methods"))
+
+    @property
+    def native_value(self) -> int:
+        methods = self.coordinator.data.diagnostics.get("supported_methods")
+        return len(methods) if isinstance(methods, list) else 0
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        raw = self.coordinator.data.diagnostics.get("raw")
+        if not isinstance(raw, dict):
+            return {"collected": 0, "categories": {}}
+        categories: dict[str, int] = {}
+        for key in raw:
+            category = str(key).split(".", 1)[0]
+            categories[category] = categories.get(category, 0) + 1
+        return {
+            "collected": len(raw),
+            "categories": categories,
         }
