@@ -379,10 +379,44 @@ class IptimeClientAsyncTest(unittest.IsolatedAsyncioTestCase):
         )
 
     def test_manual_collection_allowlist_is_intentionally_small(self) -> None:
-        self.assertEqual(len(coordinator.IptimeClient.SELECTED_READ_KEYS), 45)
+        self.assertEqual(len(coordinator.IptimeClient.SELECTED_READ_KEYS), 28)
         self.assertNotIn("admin.account", coordinator.IptimeClient.SELECTED_READ_KEYS)
         self.assertNotIn("usb.info", coordinator.IptimeClient.SELECTED_READ_KEYS)
         self.assertNotIn("vpn.users", coordinator.IptimeClient.SELECTED_READ_KEYS)
+
+    def test_traffic_snapshot_calculates_rates_and_new_errors(self) -> None:
+        before = [{
+            "type": "wan", "port": 1,
+            "rx": {"byte": 1_000_000, "drop": 10, "crc": 2},
+            "tx": {"byte": 500_000, "coll": 1},
+        }]
+        after = [{
+            "type": "wan", "port": 1,
+            "rx": {"byte": 2_000_000, "drop": 11, "crc": 2},
+            "tx": {"byte": 1_000_000, "coll": 1},
+        }]
+
+        result = coordinator.IptimeClient._traffic_snapshot(
+            before,
+            after,
+            [{"type": "wan", "port": 1, "link": "1000f"}],
+            10,
+        )
+
+        self.assertEqual(result["sample_seconds"], 10)
+        self.assertEqual(
+            result["ports"],
+            [{
+                "type": "wan",
+                "port": 1,
+                "link": "1000f",
+                "rx_mbps": 0.8,
+                "tx_mbps": 0.4,
+                "rx_drop_delta": 1,
+                "rx_crc_delta": 0,
+                "tx_collision_delta": 0,
+            }],
+        )
 
 
 if __name__ == "__main__":

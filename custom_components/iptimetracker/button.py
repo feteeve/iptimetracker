@@ -25,7 +25,7 @@ class IptimeCollectInformationButton(
 ):
     """Run the extended read-only router collection once."""
 
-    _attr_name = "ipTIME 전체 정보 수집"
+    _attr_name = "ipTIME 통신 진단 수집"
     _attr_icon = "mdi:database-refresh"
     _attr_entity_category = EntityCategory.DIAGNOSTIC
 

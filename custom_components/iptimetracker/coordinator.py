@@ -265,19 +265,14 @@ class IptimeClient:
     }
 
     # The broader catalog above is retained for future targeted diagnostics,
-    # but routine manual collection intentionally stays small. These entries
-    # cover connectivity troubleshooting without querying admin accounts,
-    # remote assistance, USB/NAS, VPN, UI metadata, history or large logs.
+    # but manual collection is restricted to connectivity diagnosis. It avoids
+    # admin, remote assistance, USB/NAS, VPN, UI, NAT rules and large logs.
     SELECTED_READ_KEYS = frozenset(
         {
             "product.info",
             "system.info",
-            "system.name",
             "system.temperature",
-            "time.config",
             "firmware.info",
-            "firmware.upgrade_status",
-            "firmware.latest",
             "network.info",
             "network.lan_info",
             "network.lan_config",
@@ -291,32 +286,20 @@ class IptimeClient:
             "dhcp.leases",
             "dhcp.reservations",
             "wireless.info",
-            "wireless.band_info",
             "wireless.band_show",
-            "wireless.band_support",
             "wireless.bss_show",
             "wireless.channel_config",
             "wireless.clients",
-            "wireless.client_info",
             "easymesh.info",
-            "easymesh.config",
             "easymesh.agents",
             "port.count",
             "port.roles",
             "port.links",
             "port.stats",
-            "nat.config",
-            "nat.dmz",
-            "nat.port_forwards",
-            "nat.upnp_config",
-            "nat.upnp_entries",
-            "security.firewall",
             "security.dos",
-            "remote.ddns",
-            "automation.wol",
-            "syslog.show",
         }
     )
+    TRAFFIC_SAMPLE_SECONDS = 10
 
     _LINK_SPEED_PATTERN = re.compile(r"^(\d+)([fh]?)$")
 
@@ -862,9 +845,10 @@ class IptimeClient:
         )
 
     async def get_diagnostics(self) -> dict[str, Any]:
-        """Read every supported allowlisted status method."""
+        """Collect one focused snapshot plus a measured traffic interval."""
         supported = await self._discover_read_capabilities()
         raw: dict[str, Any] = {}
+        traffic_start: float | None = None
         for key, (method, params) in self.READ_ONLY_METHODS.items():
             if key not in self.SELECTED_READ_KEYS:
                 continue
@@ -874,8 +858,29 @@ class IptimeClient:
                 _, payload = await self._request_json(method, params)
                 if payload.get("error") is None and payload.get("result") is not None:
                     raw[key] = payload["result"]
+                    if key == "port.stats":
+                        traffic_start = time.monotonic()
             except UpdateFailed as err:
                 _LOGGER.debug("Optional ipTIME diagnostic %s unavailable: %s", method, err)
+        traffic: dict[str, Any] | None = None
+        initial_stats = raw.get("port.stats")
+        if isinstance(initial_stats, list) and traffic_start is not None:
+            await asyncio.sleep(self.TRAFFIC_SAMPLE_SECONDS)
+            try:
+                _, payload = await self._request_json("port/stat/get")
+                final_stats = payload.get("result")
+                if isinstance(final_stats, list):
+                    elapsed = time.monotonic() - traffic_start
+                    traffic = self._traffic_snapshot(
+                        initial_stats,
+                        final_stats,
+                        raw.get("port.links"),
+                        elapsed,
+                    )
+                    raw["port.stats"] = final_stats
+            except UpdateFailed as err:
+                _LOGGER.debug("ipTIME traffic sample failed: %s", err)
+
         aliases = {
             "system": "system.info",
             "wan": "network.wan_info",
@@ -892,7 +897,56 @@ class IptimeClient:
         if raw:
             result["raw"] = raw
             result["supported_methods"] = sorted(supported)
+        if traffic:
+            result["traffic"] = traffic
         return result
+
+    @classmethod
+    def _traffic_snapshot(
+        cls,
+        initial: list[Any],
+        final: list[Any],
+        links: Any,
+        elapsed: float,
+    ) -> dict[str, Any]:
+        """Calculate per-port throughput and new errors between two counters."""
+        if elapsed <= 0:
+            return {}
+        link_map = {
+            (str(item.get("type")), cls._as_int(item.get("port"))): item.get("link")
+            for item in links if isinstance(item, dict)
+        } if isinstance(links, list) else {}
+        initial_map = {
+            (str(item.get("type")), cls._as_int(item.get("port"))): item
+            for item in initial if isinstance(item, dict)
+        }
+        ports: list[dict[str, Any]] = []
+        for item in final:
+            if not isinstance(item, dict):
+                continue
+            identity = (str(item.get("type")), cls._as_int(item.get("port")))
+            before = initial_map.get(identity)
+            if not isinstance(before, dict):
+                continue
+            before_rx = before.get("rx") if isinstance(before.get("rx"), dict) else {}
+            before_tx = before.get("tx") if isinstance(before.get("tx"), dict) else {}
+            after_rx = item.get("rx") if isinstance(item.get("rx"), dict) else {}
+            after_tx = item.get("tx") if isinstance(item.get("tx"), dict) else {}
+            rx_bytes = max(0, (cls._as_int(after_rx.get("byte")) or 0) - (cls._as_int(before_rx.get("byte")) or 0))
+            tx_bytes = max(0, (cls._as_int(after_tx.get("byte")) or 0) - (cls._as_int(before_tx.get("byte")) or 0))
+            ports.append(
+                {
+                    "type": identity[0],
+                    "port": identity[1],
+                    "link": link_map.get(identity),
+                    "rx_mbps": round(rx_bytes * 8 / elapsed / 1_000_000, 3),
+                    "tx_mbps": round(tx_bytes * 8 / elapsed / 1_000_000, 3),
+                    "rx_drop_delta": max(0, (cls._as_int(after_rx.get("drop")) or 0) - (cls._as_int(before_rx.get("drop")) or 0)),
+                    "rx_crc_delta": max(0, (cls._as_int(after_rx.get("crc")) or 0) - (cls._as_int(before_rx.get("crc")) or 0)),
+                    "tx_collision_delta": max(0, (cls._as_int(after_tx.get("coll")) or 0) - (cls._as_int(before_tx.get("coll")) or 0)),
+                }
+            )
+        return {"sample_seconds": round(elapsed, 2), "ports": ports}
 
     async def _discover_read_capabilities(self) -> set[str]:
         """Return read-only methods confirmed by the router's api/has RPC."""

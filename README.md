@@ -18,9 +18,11 @@ ipTIME 공유기의 관리자 API에서 현재 접속 기기를 읽어 Home Assi
   생성됩니다
 - WAN(인터넷) 포트의 물리 링크 상태/속도 — 인터넷이 안 될 때 ISP 쪽 문제인지
   구분하는 용도
-- 수동 읽기 전용 상세 진단 — 시스템, WAN/LAN/DHCP/DNS, 유무선, EasyMesh,
-  포트, NAT, 핵심 보안, DDNS와 WOL 정보를 `ipTIME 전체 정보 수집` 버튼을
-  눌렀을 때만 조회 (`api/has`로 해당 모델·펌웨어가 지원하는 항목만 호출)
+- 수동 읽기 전용 통신 진단 — 시스템, WAN/LAN/DHCP/DNS, 유무선, EasyMesh,
+  포트와 핵심 보안 정보를 `ipTIME 통신 진단 수집` 버튼을 눌렀을 때만 조회
+  (`api/has`로 해당 모델·펌웨어가 지원하는 항목만 호출)
+- 버튼 한 번으로 포트 통계를 10초 간격으로 두 번 읽어 WAN/LAN 실제 송수신
+  Mbps와 새 드롭·CRC·충돌 수를 계산
 - 전체 원본은 Home Assistant의 진단 데이터 다운로드에서 확인 가능하며,
   비밀번호·PSK·토큰·개인키 계열 값은 재귀적으로 가림
 - SSDP를 통한 ipTIME 공유기 자동 발견
@@ -65,7 +67,8 @@ ipTIME 공유기의 관리자 API에서 현재 접속 기기를 읽어 Home Assi
 - `sensor`: ipTIME WAN 링크 속도 (Mbps)
 - `sensor`: ipTIME 네트워크 진단, ipTIME 이지메시 진단,
   ipTIME 정보 수집 범위(지원 API 수와 수집 카테고리)
-- `button`: ipTIME 전체 정보 수집 — 평소에는 추가 API를 호출하지 않고,
+- `sensor`: 마지막 수동 진단 구간의 ipTIME WAN 수신/송신 트래픽 (Mbps)
+- `button`: ipTIME 통신 진단 수집 — 평소에는 추가 API를 호출하지 않고,
   필요할 때 한 번만 상세 정보를 수집
 
 ## 주의사항

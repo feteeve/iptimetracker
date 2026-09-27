@@ -34,6 +34,8 @@ async def async_setup_entry(
             IptimeNetworkDiagnosticsSensor(coordinator, entry),
             IptimeMeshDiagnosticsSensor(coordinator, entry),
             IptimeInformationCoverageSensor(coordinator, entry),
+            IptimeWanTrafficSensor(coordinator, entry, direction="rx"),
+            IptimeWanTrafficSensor(coordinator, entry, direction="tx"),
         ]
     )
 
@@ -248,4 +250,67 @@ class IptimeInformationCoverageSensor(
         return {
             "collected": len(raw),
             "categories": categories,
+        }
+
+
+class IptimeWanTrafficSensor(
+    CoordinatorEntity[IptimeDataUpdateCoordinator], SensorEntity
+):
+    """WAN traffic measured during the last manual diagnostic collection."""
+
+    _attr_icon = "mdi:swap-vertical-bold"
+    _attr_device_class = SensorDeviceClass.DATA_RATE
+    _attr_native_unit_of_measurement = UnitOfDataRate.MEGABITS_PER_SECOND
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(
+        self,
+        coordinator: IptimeDataUpdateCoordinator,
+        entry: ConfigEntry,
+        *,
+        direction: str,
+    ) -> None:
+        super().__init__(coordinator)
+        self._direction = direction
+        label = "수신" if direction == "rx" else "송신"
+        self._attr_name = f"ipTIME WAN {label} 트래픽"
+        self._attr_unique_id = entity_unique_id(entry, f"wan_{direction}_traffic")
+
+    @property
+    def _wan(self) -> dict | None:
+        traffic = self.coordinator.data.diagnostics.get("traffic")
+        ports = traffic.get("ports") if isinstance(traffic, dict) else None
+        if not isinstance(ports, list):
+            return None
+        return next(
+            (
+                port
+                for port in ports
+                if isinstance(port, dict) and port.get("type") == "wan"
+            ),
+            None,
+        )
+
+    @property
+    def available(self) -> bool:
+        return self._wan is not None
+
+    @property
+    def native_value(self) -> float | None:
+        wan = self._wan
+        return wan.get(f"{self._direction}_mbps") if wan else None
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        wan = self._wan or {}
+        traffic = self.coordinator.data.diagnostics.get("traffic")
+        return {
+            "sample_seconds": traffic.get("sample_seconds")
+            if isinstance(traffic, dict)
+            else None,
+            "link": wan.get("link"),
+            "rx_drop_delta": wan.get("rx_drop_delta"),
+            "rx_crc_delta": wan.get("rx_crc_delta"),
+            "tx_collision_delta": wan.get("tx_collision_delta"),
         }
