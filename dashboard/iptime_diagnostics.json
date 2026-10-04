@@ -1,0 +1,194 @@
+{
+  "title": "ipTIME 진단",
+  "views": [
+    {
+      "title": "한눈에",
+      "path": "overview",
+      "icon": "mdi:view-dashboard-outline",
+      "type": "sections",
+      "max_columns": 2,
+      "sections": [
+        {
+          "type": "grid",
+          "title": "지금 상태",
+          "cards": [
+            {
+              "type": "tile",
+              "entity": "binary_sensor.iptime_gongyugi_tongsin_sangtae",
+              "name": "HA ↔ 공유기 통신"
+            },
+            {
+              "type": "tile",
+              "entity": "binary_sensor.iptime_inteones_wan_yeongyeol",
+              "name": "공유기 ↔ 인터넷 링크"
+            },
+            {
+              "type": "tile",
+              "entity": "sensor.iptime_wan_ringkeu_sogdo",
+              "name": "WAN 링크 속도"
+            },
+            {
+              "type": "tile",
+              "entity": "sensor.iptime_ijimesi_wiseong_gigi_su",
+              "name": "EasyMesh 접속 기기"
+            }
+          ]
+        },
+        {
+          "type": "grid",
+          "title": "필요할 때 수집",
+          "cards": [
+            {
+              "type": "tile",
+              "entity": "button.iptime_jeonce_jeongbo_sujib",
+              "name": "상세 진단 수집",
+              "tap_action": {
+                "action": "perform-action",
+                "perform_action": "button.press",
+                "target": {
+                  "entity_id": "button.iptime_jeonce_jeongbo_sujib"
+                }
+              }
+            },
+            {
+              "type": "markdown",
+              "content": "{% set stamp = state_attr('sensor.iptime_neteuweokeu_jindan', 'last_success') %}\n{% if stamp %}\n{% set age = (as_timestamp(now()) - as_timestamp(stamp)) | int %}\n{% if age > 86400 %}⚠️ **지난 진단 결과** · {% else %}✅ **마지막 진단** · {% endif %}\n{{ as_timestamp(stamp) | timestamp_custom('%m/%d %H:%M', true) }} ({{ relative_time(as_datetime(stamp)) }} 전)\n{% else %}\nℹ️ **아직 상세 진단을 수집하지 않았습니다.** 아래 버튼을 누르면 새 결과가 표시됩니다.\n{% endif %}\n"
+            },
+            {
+              "type": "markdown",
+              "content": "### 이 화면에서 확인하는 순서\n1. **공유기 통신**과 **WAN 연결**을 먼저 확인합니다. 둘 다 현재 30초 조회 결과입니다.\n2. 문제가 있거나 자세히 보고 싶을 때 **상세 진단 수집**을 누릅니다. 수집에는 약 10초가 걸립니다.\n3. 결과 시각을 확인하고 **연결 상세**, **DHCP·설정** 탭을 봅니다.\n\nWAN 링크 속도는 포트가 협상한 속도이고, WAN 송수신 Mbps는 진단 구간에 실제 흐른 양입니다.\n"
+            }
+          ]
+        },
+        {
+          "type": "grid",
+          "title": "마지막 수집의 핵심 수치",
+          "cards": [
+            {
+              "type": "tile",
+              "entity": "sensor.iptime_wan_susin_teuraepig",
+              "name": "WAN 수신 Mbps"
+            },
+            {
+              "type": "tile",
+              "entity": "sensor.iptime_wan_songsin_teuraepig",
+              "name": "WAN 송신 Mbps"
+            },
+            {
+              "type": "tile",
+              "entity": "sensor.iptime_jeongbo_sujib_beomwi",
+              "name": "지원 API 수"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "title": "연결 상세",
+      "path": "connections",
+      "icon": "mdi:lan-connect",
+      "type": "sections",
+      "max_columns": 2,
+      "sections": [
+        {
+          "type": "grid",
+          "title": "결과 시각",
+          "cards": [
+            {
+              "type": "markdown",
+              "content": "{% set stamp = state_attr('sensor.iptime_neteuweokeu_jindan', 'last_success') %}\n{% if stamp %}\n{% set age = (as_timestamp(now()) - as_timestamp(stamp)) | int %}\n{% if age > 86400 %}⚠️ **지난 진단 결과** · {% else %}✅ **마지막 진단** · {% endif %}\n{{ as_timestamp(stamp) | timestamp_custom('%m/%d %H:%M', true) }} ({{ relative_time(as_datetime(stamp)) }} 전)\n{% else %}\nℹ️ **아직 상세 진단을 수집하지 않았습니다.** 아래 버튼을 누르면 새 결과가 표시됩니다.\n{% endif %}\n"
+            }
+          ]
+        },
+        {
+          "type": "grid",
+          "title": "포트별 링크·트래픽·오류",
+          "cards": [
+            {
+              "type": "markdown",
+              "content": "{% set matches = states.sensor | selectattr('name', 'eq', 'ipTIME 포트 진단') | list %}\n{% set rows = matches[0].attributes.get('entries', []) if matches else [] %}\n{% if not matches %}\n2.3.1 업데이트 후 포트 진단을 볼 수 있습니다.\n{% elif not rows %}\n수집된 포트 정보가 없습니다. **상세 진단 수집**을 눌러 주세요.\n{% else %}\n{% for p in rows %}\n**{{ (p.type or '포트') | upper }} {{ p.port }}** · 링크 {{ p.link if p.link not in [none, '', 'null'] else '끊김/미확인' }}\n{% if p.rx_mbps is defined %}↓ {{ p.rx_mbps }} Mbps · ↑ {{ p.tx_mbps }} Mbps · 새 CRC {{ p.rx_crc_delta }} · 드롭 {{ p.rx_drop_delta }} · 충돌 {{ p.tx_collision_delta }}{% else %}트래픽 측정값 없음{% endif %}\n\n{% endfor %}\n측정 Mbps는 마지막 진단의 약 10초 구간 평균입니다. 링크 숫자는 포트 협상 속도입니다.\n{% endif %}\n"
+            }
+          ]
+        },
+        {
+          "type": "grid",
+          "title": "실제 접속 기기",
+          "cards": [
+            {
+              "type": "markdown",
+              "content": "{% set matches = states.sensor | selectattr('name', 'eq', 'ipTIME 접속 기기 진단') | list %}\n{% set rows = matches[0].attributes.get('entries', []) if matches else [] %}\n{% if not matches %}\n2.3.1 업데이트 후 접속 기기 상세를 볼 수 있습니다.\n{% elif not rows %}\n수집된 접속 기기가 없습니다. **상세 진단 수집**을 눌러 주세요.\n{% else %}\n| 기기 | IP | 연결 | 신호 |\n|:--|:--|:--|--:|\n{% for d in rows %}\n| {{ (d.name or d.mac or '이름 없음') | string | replace('|', '/') | replace('\n', ' ') }} | {{ d.ip or '—' }} | {{ d.band or d.connection or '—' }} | {{ (d.rssi_dbm | string) ~ ' dBm' if d.rssi_dbm is not none else '—' }} |\n{% endfor %}\n\n이 목록은 **진단 버튼을 누른 순간의 실제 접속 기기**입니다. RSSI는 무선 신호 세기이며 연결 속도가 아닙니다.\n{% endif %}\n"
+            }
+          ]
+        },
+        {
+          "type": "grid",
+          "title": "EasyMesh 에이전트",
+          "cards": [
+            {
+              "type": "markdown",
+              "content": "{% set agents = state_attr('sensor.iptime_ijimesi_jindan', 'agents') or [] %}\n**공유기 역할:** {{ states('sensor.iptime_ijimesi_jindan') }}\n{% if agents %}\n{% for a in agents %}\n- **{{ a.nickname or a.product_name or a.mac or '에이전트' }}** · 상태 {{ a.status or '미확인' }} · 백홀 {{ a.backhaul or a.connection or '속도 정보 없음' }}\n{% endfor %}\n{% else %}\n진단에서 확인된 에이전트 정보가 없습니다.\n{% endif %}\n에이전트의 숫자 연결 속도는 공유기가 값을 제공할 때만 확인할 수 있습니다.\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "title": "DHCP·설정",
+      "path": "addresses",
+      "icon": "mdi:ip-network-outline",
+      "type": "sections",
+      "max_columns": 2,
+      "sections": [
+        {
+          "type": "grid",
+          "title": "결과 시각",
+          "cards": [
+            {
+              "type": "markdown",
+              "content": "{% set stamp = state_attr('sensor.iptime_neteuweokeu_jindan', 'last_success') %}\n{% if stamp %}\n{% set age = (as_timestamp(now()) - as_timestamp(stamp)) | int %}\n{% if age > 86400 %}⚠️ **지난 진단 결과** · {% else %}✅ **마지막 진단** · {% endif %}\n{{ as_timestamp(stamp) | timestamp_custom('%m/%d %H:%M', true) }} ({{ relative_time(as_datetime(stamp)) }} 전)\n{% else %}\nℹ️ **아직 상세 진단을 수집하지 않았습니다.** 아래 버튼을 누르면 새 결과가 표시됩니다.\n{% endif %}\n"
+            }
+          ]
+        },
+        {
+          "type": "grid",
+          "title": "IP 임대와 수동 할당",
+          "cards": [
+            {
+              "type": "markdown",
+              "content": "{% set lease_matches = states.sensor | selectattr('name', 'eq', 'ipTIME DHCP 임대 수') | list %}\n{% set reserved_matches = states.sensor | selectattr('name', 'eq', 'ipTIME DHCP 수동 할당 수') | list %}\n{% if not lease_matches or not reserved_matches %}\n2.3.0 이상으로 업데이트하면 DHCP 목록이 표시됩니다.\n{% else %}\n{% set leases = lease_matches[0].attributes.get('entries', []) %}\n{% set reserved = reserved_matches[0].attributes.get('entries', []) %}\n**수동 할당 {{ reserved_matches[0].state }}개**\n{% if reserved %}\n| IP | 기기 | MAC |\n|:--|:--|:--|\n{% for r in reserved %}| {{ r.ip }} | {{ (r.name or '설명 없음') | replace('|', '/') | replace('\n', ' ') }} | {{ r.mac }} |\n{% endfor %}\n{% else %}수동 할당 목록이 비어 있거나 아직 수집되지 않았습니다.\n{% endif %}\n\n**DHCP 임대 {{ lease_matches[0].state }}개**\n{% if leases %}\n| IP | 기기 | MAC |\n|:--|:--|:--|\n{% for r in leases %}| {{ r.ip }} | {{ (r.name or '이름 없음') | replace('|', '/') | replace('\n', ' ') }} | {{ r.mac }} |\n{% endfor %}\n{% else %}임대 목록이 비어 있거나 아직 수집되지 않았습니다.\n{% endif %}\n\n임대 기록은 **현재 접속 중이라는 뜻이 아닙니다.** 실제 접속 여부는 연결 상세 탭에서 확인하세요.\n{% endif %}\n"
+            }
+          ]
+        },
+        {
+          "type": "grid",
+          "title": "수동 할당 추가",
+          "cards": [
+            {
+              "type": "markdown",
+              "content": "### 수동 할당 추가\n아래 **통합 설정 열기**를 누른 뒤 **설정 → DHCP 수동 할당 추가**를 선택하세요.\n현재 접속 기기를 고르면 MAC·IP·이름이 미리 채워집니다. 저장 전에 IP를 확인해 주세요.\n"
+            },
+            {
+              "type": "button",
+              "name": "통합 설정 열기",
+              "icon": "mdi:ip-network-outline",
+              "tap_action": {
+                "action": "navigate",
+                "navigation_path": "/config/integrations/integration/iptimetracker"
+              }
+            }
+          ]
+        },
+        {
+          "type": "grid",
+          "title": "주요 설정",
+          "cards": [
+            {
+              "type": "markdown",
+              "content": "{% set matches = states.sensor | selectattr('name', 'eq', 'ipTIME 주요 설정 진단') | list %}\n{% set e = matches[0] if matches else none %}\n{% if not e %}\n2.3.1 업데이트 후 주요 설정을 볼 수 있습니다.\n{% elif e.state in ['unavailable', 'unknown'] %}\n확인 가능한 설정값이 없습니다. **상세 진단 수집**을 눌러 주세요.\n{% else %}\n{% for group, label in [('lan', 'LAN'), ('dhcp', 'DHCP'), ('dhcp_status', 'DHCP 상태'), ('wireless_channel', '무선 채널')] %}\n{% set values = e.attributes.get(group) %}\n{% if values %}\n**{{ label }}**\n{% for key, value in values.items() %}\n- {{ key }}: {{ value }}\n{% endfor %}\n{% endif %}\n{% endfor %}\n공유기가 제공하지 않는 필드는 표시하지 않습니다. 이 화면에서는 설정을 변경하지 않습니다.\n{% endif %}\n"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -25,13 +25,24 @@
   "options": {
     "step": {
       "init": {
-        "title": "Device tracking settings",
+        "title": "ipTIME management",
         "description": "You're currently tracking {tracked_count} device(s). Choose what you'd like to do.",
         "menu_options": {
           "add_select": "Add a new device",
           "manage_select": "Edit or remove tracked devices",
+          "dhcp_select": "Add DHCP reservation",
           "settings": "Settings (away detection delay)"
         }
+      },
+      "dhcp_select": {
+        "title": "Choose a device to reserve",
+        "description": "Already reserved devices are excluded. Choose a connected device to prefill its MAC, IP and name, or enter an offline device manually.",
+        "data": {"device": "Device"}
+      },
+      "dhcp_add": {
+        "title": "Add DHCP reservation",
+        "description": "Saving changes the router configuration. The integration checks IP conflicts and the LAN subnet, then reads back the result. {error_detail}",
+        "data": {"mac": "MAC address", "ip": "Reserved IP address", "description": "Device description"}
       },
       "add_select": {
         "title": "Choose devices to add",
@@ -72,10 +83,14 @@
     },
     "error": {
       "duplicate_nickname": "This name is already used by another device: {nickname}. Enter a different name.",
-      "select_at_least_one": "Select at least one device to add."
+      "select_at_least_one": "Select at least one device to add.",
+      "dhcp_failed": "Could not add the reservation. See the error details below."
     },
     "abort": {
-      "no_addable_devices": "There are no new devices to add. There's nothing currently connected or reserved with a static IP that isn't already tracked."
+      "no_addable_devices": "There are no new devices to add. There's nothing currently connected or reserved with a static IP that isn't already tracked.",
+      "router_unavailable": "The router integration is unavailable.",
+      "dhcp_unavailable": "The router's current reservations could not be read. Try again later.",
+      "dhcp_added": "The DHCP reservation was added and verified on the router."
     }
   }
 }

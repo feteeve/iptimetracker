@@ -38,6 +38,10 @@ class DhcpTest(unittest.IsolatedAsyncioTestCase):
 
         self.manager = dhcp.DhcpReservations(SimpleNamespace(_request_json=AsyncMock(side_effect=request)))
 
+    async def test_list_shows_existing_reservation(self) -> None:
+        self.reservations = [{"mac": "AA:BB:CC:DD:EE:02", "ip": "192.168.0.52", "desc": "TV"}]
+        self.assertEqual((await self.manager.list())[0]["name"], "TV")
+
     async def test_add_checks_and_verifies(self) -> None:
         rows = await self.manager.add("aa-bb-cc-dd-ee-02", "192.168.0.52", "TV")
         self.assertEqual(rows, [{"mac": "AA:BB:CC:DD:EE:02", "ip": "192.168.0.52", "name": "TV"}])

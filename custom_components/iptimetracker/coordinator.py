@@ -17,6 +17,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .const import DOMAIN, RSSI_LIMIT, SCAN_INTERVAL
+from .dhcp import DhcpReservations
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -1030,6 +1031,7 @@ class IptimeDataUpdateCoordinator(DataUpdateCoordinator[IptimeData]):
             update_interval=timedelta(seconds=SCAN_INTERVAL),
         )
         self.client = client
+        self.dhcp_reservations = DhcpReservations(client)
         self.entry = entry
         self._diagnostics: dict[str, Any] = {}
         self._diagnostics_updated_at: float | None = None
@@ -1051,3 +1053,17 @@ class IptimeDataUpdateCoordinator(DataUpdateCoordinator[IptimeData]):
         data.diagnostics = latest
         data.diagnostics_updated_at = self._diagnostics_updated_at
         self.async_set_updated_data(data)
+
+    async def async_add_dhcp_reservation(self, mac: str, ip: str, description: str) -> None:
+        """Add a verified reservation and refresh its cached manual snapshot."""
+        updated = await self.dhcp_reservations.add(mac, ip, description)
+        diagnostics = dict(self.data.diagnostics)
+        raw = dict(diagnostics.get("raw") or {})
+        raw["dhcp.reservations"] = [
+            {"mac": row["mac"], "ip": row["ip"], "desc": row["name"]}
+            for row in updated
+        ]
+        diagnostics["raw"] = raw
+        self.data.diagnostics = diagnostics
+        self._diagnostics = diagnostics
+        self.async_set_updated_data(self.data)

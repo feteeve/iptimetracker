@@ -120,6 +120,7 @@ _EMPTY_DEVICE_INFO: dict[str, str] = {
     "reservation_confidence": "",
 }
 _DONE_SENTINEL = "__done__"
+_MANUAL_DHCP_SENTINEL = "__manual_dhcp__"
 
 
 def _duplicate_nickname(nicknames: dict[str, str]) -> str | None:
@@ -344,6 +345,7 @@ class IptimeTrackerOptionsFlow(OptionsFlow):
         self._pending_tracked_macs: list[str] | None = None
         self._pending_nicknames: dict[str, str] = {}
         self._editing_mac: str | None = None
+        self._dhcp_prefill: dict[str, str] = {}
 
     @property
     def _entry(self) -> ConfigEntry:
@@ -360,11 +362,94 @@ class IptimeTrackerOptionsFlow(OptionsFlow):
         menu_options = ["add_select"]
         if tracked_count:
             menu_options.append("manage_select")
+        menu_options.append("dhcp_select")
         menu_options.append("settings")
         return self.async_show_menu(
             step_id="init",
             menu_options=menu_options,
             description_placeholders={"tracked_count": str(tracked_count)},
+        )
+
+    # ---- DHCP reservation -----------------------------------------------
+
+    async def async_step_dhcp_select(
+        self, user_input: dict[str, str] | None = None
+    ) -> ConfigFlowResult:
+        """Choose an online device, or enter an offline device manually."""
+        coordinator = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id)
+        if coordinator is None or coordinator.data is None:
+            return self.async_abort(reason="router_unavailable")
+        try:
+            reservations = await coordinator.dhcp_reservations.list()
+        except (ValueError, UpdateFailed, TimeoutError):
+            return self.async_abort(reason="dhcp_unavailable")
+        reserved_macs = {row["mac"] for row in reservations}
+        manual_label = (
+            "직접 MAC/IP 입력"
+            if getattr(self.hass.config, "language", "en").lower().startswith("ko")
+            else "Enter MAC/IP manually"
+        )
+        choices = [SelectOptionDict(value=_MANUAL_DHCP_SENTINEL, label=manual_label)]
+        clients = sorted(coordinator.data.connected_clients, key=lambda item: _ip_sort_key(item.ip))
+        for client in clients:
+            if client.mac and client.mac not in reserved_macs:
+                choices.append(
+                    SelectOptionDict(
+                        value=client.mac,
+                        label=f"{client.ip or '?'} · {client.display_name} · {client.mac}",
+                    )
+                )
+        if user_input is not None:
+            selected = user_input["device"]
+            client = next((item for item in clients if item.mac == selected), None)
+            self._dhcp_prefill = {
+                "mac": client.mac if client else "",
+                "ip": client.ip if client else "",
+                "description": client.display_name if client and client.display_name != client.mac else "",
+            }
+            return await self.async_step_dhcp_add()
+        return self.async_show_form(
+            step_id="dhcp_select",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("device", default=_MANUAL_DHCP_SENTINEL): SelectSelector(
+                        SelectSelectorConfig(options=choices, mode=SelectSelectorMode.LIST)
+                    ),
+                }
+            ),
+        )
+
+    async def async_step_dhcp_add(
+        self, user_input: dict[str, str] | None = None
+    ) -> ConfigFlowResult:
+        """Validate and add a reservation through the guarded coordinator."""
+        errors: dict[str, str] = {}
+        detail = ""
+        if user_input is not None:
+            coordinator = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id)
+            if coordinator is None:
+                return self.async_abort(reason="router_unavailable")
+            try:
+                await coordinator.async_add_dhcp_reservation(
+                    user_input["mac"], user_input["ip"], user_input.get("description", "")
+                )
+            except (ValueError, UpdateFailed, TimeoutError) as err:
+                errors["base"] = "dhcp_failed"
+                detail = str(err)
+                self._dhcp_prefill = user_input
+            else:
+                return self.async_abort(reason="dhcp_added")
+        return self.async_show_form(
+            step_id="dhcp_add",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("mac", default=self._dhcp_prefill.get("mac", "")): str,
+                    vol.Required("ip", default=self._dhcp_prefill.get("ip", "")): str,
+                    vol.Optional("description", default=self._dhcp_prefill.get("description", "")): str,
+                }
+            ),
+            errors=errors,
+            description_placeholders={"error_detail": detail},
         )
 
     # ---- Add devices --------------------------------------------------

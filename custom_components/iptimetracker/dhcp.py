@@ -52,6 +52,13 @@ class DhcpReservations:
             raise ValueError("공유기의 DHCP 조회에 실패했습니다")
         return payload["result"]
 
+    async def list(self) -> list[dict[str, str]]:
+        """Read current reservations when the user opens the add flow."""
+        rows = parse_rows(await self._read("dhcpd/reservedaddr/show", "lan"), reservation=True)
+        if rows is None:
+            raise ValueError("수동 할당 목록 형식을 확인할 수 없습니다")
+        return rows
+
     async def add(self, mac_value: str, ip_value: str, description: str = "") -> list[dict[str, str]]:
         """Create one reservation after fresh conflict checks and readback."""
         mac = normalize_mac(mac_value)

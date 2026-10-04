@@ -12,7 +12,6 @@ from homeassistant.helpers import entity_registry as er
 
 from .const import CONF_HOST, CONF_PASSWORD, CONF_USERNAME, DOMAIN
 from .coordinator import IptimeClient, IptimeDataUpdateCoordinator
-from .dhcp import DhcpReservations
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -39,22 +38,11 @@ async def _async_add_dhcp_reservation(hass: HomeAssistant, call: ServiceCall) ->
     if coordinator is None:
         raise HomeAssistantError("ipTIME 구성 항목을 찾을 수 없습니다")
     try:
-        updated = await coordinator.dhcp_reservations.add(
+        await coordinator.async_add_dhcp_reservation(
             call.data["mac"], call.data["ip"], call.data["description"]
         )
     except (ValueError, TypeError) as err:
         raise HomeAssistantError(str(err)) from err
-    # Update the cached snapshot so the sensor reflects the verified write.
-    diagnostics = dict(coordinator.data.diagnostics)
-    raw = dict(diagnostics.get("raw") or {})
-    raw["dhcp.reservations"] = [
-        {"mac": row["mac"], "ip": row["ip"], "desc": row["name"]}
-        for row in updated
-    ]
-    diagnostics["raw"] = raw
-    coordinator.data.diagnostics = diagnostics
-    coordinator._diagnostics = diagnostics
-    coordinator.async_set_updated_data(coordinator.data)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -65,7 +53,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
 
     coordinator = IptimeDataUpdateCoordinator(hass, client, entry)
-    coordinator.dhcp_reservations = DhcpReservations(client)
 
     try:
         await coordinator.async_config_entry_first_refresh()

@@ -25,13 +25,24 @@
   "options": {
     "step": {
       "init": {
-        "title": "기기 추적 설정",
+        "title": "ipTIME 관리",
         "description": "현재 {tracked_count}개 기기를 추적하고 있습니다. 원하는 작업을 선택하세요.",
         "menu_options": {
           "add_select": "새 기기 추가",
           "manage_select": "추적 중인 기기 편집 · 삭제",
+          "dhcp_select": "DHCP 수동 할당 추가",
           "settings": "설정 (away 판정 시간)"
         }
+      },
+      "dhcp_select": {
+        "title": "수동 할당할 기기 선택",
+        "description": "이미 수동 할당된 기기는 선택 목록에서 제외됩니다. 현재 접속 기기를 고르면 MAC·IP·이름이 채워집니다. 목록에 없는 기기는 직접 입력을 선택하세요.",
+        "data": {"device": "기기"}
+      },
+      "dhcp_add": {
+        "title": "DHCP 수동 할당 추가",
+        "description": "저장하면 공유기 설정이 변경됩니다. IP 중복과 LAN 대역을 검사하고 적용 결과를 다시 확인합니다. {error_detail}",
+        "data": {"mac": "MAC 주소", "ip": "고정할 IP 주소", "description": "기기 설명"}
       },
       "add_select": {
         "title": "추가할 기기 선택",
@@ -72,10 +83,14 @@
     },
     "error": {
       "duplicate_nickname": "이미 다른 기기에서 사용 중인 이름입니다: {nickname}. 서로 다른 이름을 입력하세요.",
-      "select_at_least_one": "추가할 기기를 하나 이상 선택하세요."
+      "select_at_least_one": "추가할 기기를 하나 이상 선택하세요.",
+      "dhcp_failed": "수동 할당을 완료하지 못했습니다. 아래 오류 내용을 확인하세요."
     },
     "abort": {
-      "no_addable_devices": "추가할 수 있는 새 기기가 없습니다. 공유기에 연결되어 있거나 고정 IP로 이름이 등록된 기기 중, 아직 추적하지 않는 기기가 없습니다."
+      "no_addable_devices": "추가할 수 있는 새 기기가 없습니다. 공유기에 연결되어 있거나 고정 IP로 이름이 등록된 기기 중, 아직 추적하지 않는 기기가 없습니다.",
+      "router_unavailable": "공유기 통합 구성요소를 사용할 수 없습니다.",
+      "dhcp_unavailable": "공유기의 현재 수동 할당 목록을 확인할 수 없습니다. 잠시 후 다시 시도하세요.",
+      "dhcp_added": "공유기에 DHCP 수동 할당을 추가하고 다시 읽어 확인했습니다."
     }
   }
 }
