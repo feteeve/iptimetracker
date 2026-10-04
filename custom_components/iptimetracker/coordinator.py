@@ -1057,6 +1057,28 @@ class IptimeDataUpdateCoordinator(DataUpdateCoordinator[IptimeData]):
     async def async_add_dhcp_reservation(self, mac: str, ip: str, description: str) -> None:
         """Add a verified reservation and refresh its cached manual snapshot."""
         updated = await self.dhcp_reservations.add(mac, ip, description)
+        self._update_dhcp_snapshot(updated)
+
+    async def async_update_dhcp_reservation(
+        self, mac: str, ip: str, description: str,
+        *, expected_ip: str | None = None, expected_name: str | None = None,
+    ) -> None:
+        updated = await self.dhcp_reservations.update(
+            mac, ip, description, expected_ip=expected_ip, expected_name=expected_name
+        )
+        self._update_dhcp_snapshot(updated)
+
+    async def async_delete_dhcp_reservation(
+        self, mac: str, *, expected_ip: str | None = None,
+        expected_name: str | None = None,
+    ) -> None:
+        updated = await self.dhcp_reservations.delete(
+            mac, expected_ip=expected_ip, expected_name=expected_name
+        )
+        self._update_dhcp_snapshot(updated)
+
+    def _update_dhcp_snapshot(self, updated: list[dict[str, str]]) -> None:
+        """Refresh the on-demand reservation view without running a full diagnosis."""
         diagnostics = dict(self.data.diagnostics)
         raw = dict(diagnostics.get("raw") or {})
         raw["dhcp.reservations"] = [

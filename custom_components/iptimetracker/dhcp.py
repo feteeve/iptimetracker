@@ -30,10 +30,14 @@ def parse_rows(value: Any, *, reservation: bool) -> list[dict[str, str]] | None:
             ip = str(ipaddress.IPv4Address(item.get("ip")))
         except (ValueError, ipaddress.AddressValueError):
             return None
+        if reservation and "desc" in item:
+            name = item["desc"]
+        else:
+            name = item.get("hostname") or item.get("name")
         row = {
             "mac": mac,
             "ip": ip,
-            "name": str(item.get("desc" if reservation else "hostname") or item.get("name") or ""),
+            "name": str(name if name is not None else ""),
         }
         if not reservation:
             row["expires"] = str(item.get("expires") or item.get("expire") or "")
@@ -59,42 +63,62 @@ class DhcpReservations:
             raise ValueError("수동 할당 목록 형식을 확인할 수 없습니다")
         return rows
 
+    @staticmethod
+    def _check_description(description: str) -> None:
+        if len(description) > 100 or any(ord(char) < 32 for char in description):
+            raise ValueError("설명은 제어 문자가 없는 100자 이하여야 합니다")
+
+    async def _check_target_ip(
+        self, mac: str, ip: str, existing: list[dict[str, str]]
+    ) -> None:
+        leases = parse_rows(await self._read("dhcpd/lease/show", "lan"), reservation=False)
+        if leases is None:
+            raise ValueError("DHCP 임대 목록 형식을 확인할 수 없어 변경을 중단했습니다")
+        if any(row["ip"] == ip and row["mac"] != mac for row in existing + leases):
+            raise ValueError("이 IP는 다른 기기에 할당되었거나 예약되어 있습니다")
+        lan = await self._read("network/interface/lan/info")
+        if not isinstance(lan, dict) or not lan.get("ip") or not lan.get("mask"):
+            raise ValueError("LAN 대역을 확인할 수 없어 변경을 중단했습니다")
+        subnet = ipaddress.IPv4Network(f"{lan['ip']}/{lan['mask']}", strict=False)
+        address = ipaddress.IPv4Address(ip)
+        if address not in subnet or address in (
+            subnet.network_address,
+            subnet.broadcast_address,
+            ipaddress.IPv4Address(lan["ip"]),
+        ):
+            raise ValueError("공유기 LAN에서 사용할 수 있는 IP가 아닙니다")
+        stations = await self._read("network/interface/lan/stations")
+        if not isinstance(stations, list):
+            raise ValueError("현재 접속 기기 목록을 확인할 수 없습니다")
+        for station in stations:
+            if not isinstance(station, dict):
+                raise ValueError("접속 기기 목록 형식이 올바르지 않습니다")
+            info = station.get("info")
+            station_ip = info.get("ip") if isinstance(info, dict) else station.get("ip")
+            if station_ip == ip and normalize_mac(str(station.get("mac") or "")) != mac:
+                raise ValueError("이 IP를 다른 접속 기기가 사용 중입니다")
+
+    async def _readback(self) -> list[dict[str, str]]:
+        try:
+            updated = parse_rows(await self._read("dhcpd/reservedaddr/show", "lan"), reservation=True)
+        except Exception as err:
+            raise ValueError("변경 요청 후 재조회에 실패했습니다. 다시 시도하기 전에 공유기 목록을 확인하세요") from err
+        if updated is None:
+            raise ValueError("변경 후 목록 형식을 확인할 수 없습니다. 다시 시도하기 전에 공유기 목록을 확인하세요")
+        return updated
+
     async def add(self, mac_value: str, ip_value: str, description: str = "") -> list[dict[str, str]]:
         """Create one reservation after fresh conflict checks and readback."""
         mac = normalize_mac(mac_value)
         ip = str(ipaddress.IPv4Address(ip_value))
-        if len(description) > 100 or any(ord(char) < 32 for char in description):
-            raise ValueError("설명은 제어 문자가 없는 100자 이하여야 합니다")
+        self._check_description(description)
         async with self.lock:
             existing = parse_rows(await self._read("dhcpd/reservedaddr/show", "lan"), reservation=True)
-            leases = parse_rows(await self._read("dhcpd/lease/show", "lan"), reservation=False)
-            if existing is None or leases is None:
-                raise ValueError("DHCP 목록 형식을 확인할 수 없어 변경을 중단했습니다")
+            if existing is None:
+                raise ValueError("수동 할당 목록 형식을 확인할 수 없어 변경을 중단했습니다")
             if any(row["mac"] == mac for row in existing):
                 raise ValueError("이 MAC은 이미 수동 할당되어 있습니다")
-            if any(row["ip"] == ip and row["mac"] != mac for row in existing + leases):
-                raise ValueError("이 IP는 다른 기기에 할당되었거나 예약되어 있습니다")
-            lan = await self._read("network/interface/lan/info")
-            if not isinstance(lan, dict) or not lan.get("ip") or not lan.get("mask"):
-                raise ValueError("LAN 대역을 확인할 수 없어 변경을 중단했습니다")
-            subnet = ipaddress.IPv4Network(f"{lan['ip']}/{lan['mask']}", strict=False)
-            address = ipaddress.IPv4Address(ip)
-            if address not in subnet or address in (
-                subnet.network_address,
-                subnet.broadcast_address,
-                ipaddress.IPv4Address(lan["ip"]),
-            ):
-                raise ValueError("공유기 LAN에서 사용할 수 있는 IP가 아닙니다")
-            stations = await self._read("network/interface/lan/stations")
-            if not isinstance(stations, list):
-                raise ValueError("현재 접속 기기 목록을 확인할 수 없습니다")
-            for station in stations:
-                if not isinstance(station, dict):
-                    raise ValueError("접속 기기 목록 형식이 올바르지 않습니다")
-                info = station.get("info")
-                station_ip = info.get("ip") if isinstance(info, dict) else station.get("ip")
-                if station_ip == ip and normalize_mac(str(station.get("mac") or "")) != mac:
-                    raise ValueError("이 IP를 다른 접속 기기가 사용 중입니다")
+            await self._check_target_ip(mac, ip, existing)
             # Do not retry a write on timeout: it may already have applied.
             _, result = await self.client._request_json(
                 "dhcpd/reservedaddr/add",
@@ -103,10 +127,67 @@ class DhcpReservations:
             )
             if result.get("error") is not None or result.get("result") is None:
                 raise ValueError("공유기가 수동 할당 요청을 거부했습니다")
-            try:
-                updated = parse_rows(await self._read("dhcpd/reservedaddr/show", "lan"), reservation=True)
-            except Exception as err:
-                raise ValueError("수동 할당 요청 후 재조회에 실패했습니다. 다시 시도하기 전에 공유기 목록을 확인하세요") from err
-            if updated is None or not any(row["mac"] == mac and row["ip"] == ip for row in updated):
+            updated = await self._readback()
+            if [row for row in updated if row["mac"] == mac] != [
+                {"mac": mac, "ip": ip, "name": description}
+            ]:
                 raise ValueError("적용 여부를 확인하지 못했습니다. 다시 시도하기 전에 공유기 목록을 확인하세요")
+            return updated
+
+    async def update(
+        self, mac_value: str, ip_value: str, description: str,
+        *, expected_ip: str | None = None, expected_name: str | None = None,
+    ) -> list[dict[str, str]]:
+        """Update one reservation using the router's same-MAC add operation."""
+        mac = normalize_mac(mac_value)
+        ip = str(ipaddress.IPv4Address(ip_value))
+        self._check_description(description)
+        async with self.lock:
+            existing = await self.list()
+            current = next((row for row in existing if row["mac"] == mac), None)
+            if current is None:
+                raise ValueError("수정할 수동 할당이 더 이상 없습니다")
+            if (expected_ip is not None and current["ip"] != expected_ip) or (
+                expected_name is not None and current["name"] != expected_name
+            ):
+                raise ValueError("수동 할당이 다른 곳에서 변경되었습니다. 목록을 다시 열어 확인하세요")
+            await self._check_target_ip(mac, ip, existing)
+            _, result = await self.client._request_json(
+                "dhcpd/reservedaddr/add",
+                {"ntag": "lan", "mac": mac, "ip": ip, "desc": description},
+                retry_on_auth=False,
+            )
+            if result.get("error") is not None or result.get("result") is None:
+                raise ValueError("공유기가 수동 할당 수정 요청을 거부했습니다")
+            updated = await self._readback()
+            if [row for row in updated if row["mac"] == mac] != [
+                {"mac": mac, "ip": ip, "name": description}
+            ]:
+                raise ValueError("수정 여부를 확인하지 못했습니다. 다시 시도하기 전에 공유기 목록을 확인하세요")
+            return updated
+
+    async def delete(
+        self, mac_value: str, *, expected_ip: str | None = None,
+        expected_name: str | None = None,
+    ) -> list[dict[str, str]]:
+        """Delete exactly one previously read reservation and verify absence."""
+        mac = normalize_mac(mac_value)
+        async with self.lock:
+            existing = await self.list()
+            current = next((row for row in existing if row["mac"] == mac), None)
+            if current is None:
+                raise ValueError("삭제할 수동 할당이 더 이상 없습니다")
+            if (expected_ip is not None and current["ip"] != expected_ip) or (
+                expected_name is not None and current["name"] != expected_name
+            ):
+                raise ValueError("수동 할당이 다른 곳에서 변경되었습니다. 목록을 다시 열어 확인하세요")
+            _, result = await self.client._request_json(
+                "dhcpd/reservedaddr/del", {"ntag": "lan", "mac": [mac]},
+                retry_on_auth=False,
+            )
+            if result.get("error") is not None or result.get("result") is None:
+                raise ValueError("공유기가 수동 할당 삭제 요청을 거부했습니다")
+            updated = await self._readback()
+            if any(row["mac"] == mac for row in updated):
+                raise ValueError("삭제 여부를 확인하지 못했습니다. 다시 시도하기 전에 공유기 목록을 확인하세요")
             return updated

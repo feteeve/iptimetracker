@@ -26,6 +26,10 @@ class DhcpTest(unittest.IsolatedAsyncioTestCase):
                 ["192.168.0.2", "192.168.0.10", "192.168.0.100"],
             )
 
+    def test_blank_reservation_description_stays_blank(self) -> None:
+        row = {"mac": "AA:BB:CC:DD:EE:02", "ip": "192.168.0.52", "desc": "", "name": "router default"}
+        self.assertEqual(dhcp.parse_rows([row], reservation=True)[0]["name"], "")
+
     def setUp(self) -> None:
         self.calls = []
         self.reservations = []
@@ -43,7 +47,11 @@ class DhcpTest(unittest.IsolatedAsyncioTestCase):
             if method == "network/interface/lan/stations":
                 return None, {"result": list(self.stations)}
             if method == "dhcpd/reservedaddr/add":
+                self.reservations = [row for row in self.reservations if row["mac"] != params["mac"]]
                 self.reservations.append({"mac": params["mac"], "ip": params["ip"], "desc": params["desc"]})
+                return None, {"result": True}
+            if method == "dhcpd/reservedaddr/del":
+                self.reservations = [row for row in self.reservations if row["mac"] not in params["mac"]]
                 return None, {"result": True}
             raise AssertionError(method)
 
@@ -97,6 +105,75 @@ class DhcpTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(TimeoutError):
             await self.manager.add("AA:BB:CC:DD:EE:02", "192.168.0.52")
         self.assertEqual(attempts, 1)
+
+    async def test_update_preserves_mac_and_verifies_new_values(self) -> None:
+        self.reservations = [{"mac": "AA:BB:CC:DD:EE:02", "ip": "192.168.0.52", "desc": "TV"}]
+        rows = await self.manager.update(
+            "aa-bb-cc-dd-ee-02", "192.168.0.53", "거실 TV",
+            expected_ip="192.168.0.52", expected_name="TV",
+        )
+        self.assertEqual(rows[0]["ip"], "192.168.0.53")
+        self.assertEqual(rows[0]["name"], "거실 TV")
+        self.assertEqual([call for call in self.calls if call[0].endswith("/add")][0][2], {"retry_on_auth": False})
+
+    async def test_update_rejects_conflict_and_stale_selection(self) -> None:
+        self.reservations = [{"mac": "AA:BB:CC:DD:EE:02", "ip": "192.168.0.52", "desc": "TV"}]
+        with self.assertRaisesRegex(ValueError, "다른 곳에서 변경"):
+            await self.manager.update("AA:BB:CC:DD:EE:02", "192.168.0.53", "TV", expected_ip="192.168.0.51")
+        with self.assertRaisesRegex(ValueError, "다른 기기"):
+            await self.manager.update("AA:BB:CC:DD:EE:02", "192.168.0.50", "TV")
+        self.assertFalse(any(call[0].endswith("/add") for call in self.calls))
+
+    async def test_delete_one_reservation_and_verify_absence(self) -> None:
+        self.reservations = [
+            {"mac": "AA:BB:CC:DD:EE:02", "ip": "192.168.0.52", "desc": "TV"},
+            {"mac": "AA:BB:CC:DD:EE:03", "ip": "192.168.0.53", "desc": "PC"},
+        ]
+        rows = await self.manager.delete(
+            "AA:BB:CC:DD:EE:02", expected_ip="192.168.0.52", expected_name="TV"
+        )
+        self.assertEqual([row["mac"] for row in rows], ["AA:BB:CC:DD:EE:03"])
+        write = [call for call in self.calls if call[0].endswith("/del")]
+        self.assertEqual(write[0][1], {"ntag": "lan", "mac": ["AA:BB:CC:DD:EE:02"]})
+        self.assertEqual(write[0][2], {"retry_on_auth": False})
+
+    async def test_delete_rejects_stale_selection_without_write(self) -> None:
+        self.reservations = [{"mac": "AA:BB:CC:DD:EE:02", "ip": "192.168.0.52", "desc": "TV"}]
+        with self.assertRaisesRegex(ValueError, "다른 곳에서 변경"):
+            await self.manager.delete("AA:BB:CC:DD:EE:02", expected_name="Old TV")
+        self.assertFalse(any(call[0].endswith("/del") for call in self.calls))
+
+    async def test_delete_does_not_retry_or_claim_unverified_result(self) -> None:
+        self.reservations = [{"mac": "AA:BB:CC:DD:EE:02", "ip": "192.168.0.52", "desc": "TV"}]
+        original = self.manager.client._request_json.side_effect
+        attempts = 0
+
+        async def uncertain_delete(method, params=None, **kwargs):
+            nonlocal attempts
+            if method == "dhcpd/reservedaddr/del":
+                attempts += 1
+                raise TimeoutError
+            return await original(method, params, **kwargs)
+
+        self.manager.client._request_json.side_effect = uncertain_delete
+        with self.assertRaises(TimeoutError):
+            await self.manager.delete("AA:BB:CC:DD:EE:02")
+        self.assertEqual(attempts, 1)
+
+    async def test_readback_rejects_ignored_update_and_delete(self) -> None:
+        self.reservations = [{"mac": "AA:BB:CC:DD:EE:02", "ip": "192.168.0.52", "desc": "TV"}]
+        original = self.manager.client._request_json.side_effect
+
+        async def ignored_write(method, params=None, **kwargs):
+            if method in {"dhcpd/reservedaddr/add", "dhcpd/reservedaddr/del"}:
+                return None, {"result": True}
+            return await original(method, params, **kwargs)
+
+        self.manager.client._request_json.side_effect = ignored_write
+        with self.assertRaisesRegex(ValueError, "수정 여부"):
+            await self.manager.update("AA:BB:CC:DD:EE:02", "192.168.0.53", "TV")
+        with self.assertRaisesRegex(ValueError, "삭제 여부"):
+            await self.manager.delete("AA:BB:CC:DD:EE:02")
 
 
 if __name__ == "__main__":

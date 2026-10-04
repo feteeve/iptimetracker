@@ -126,9 +126,11 @@ SETTINGS = """{% set matches = states.sensor | selectattr('name', 'eq', 'ipTIME 
 {% endif %}
 """
 
-DHCP_ACTION = """### 수동 할당 추가
-아래 **통합 설정 열기**를 누른 뒤 **설정 → DHCP 수동 할당 추가**를 선택하세요.
-현재 접속 기기를 고르면 MAC·IP·이름이 미리 채워집니다. 저장 전에 IP를 확인해 주세요.
+DHCP_ACTION = """**추가:** 통합 설정에서 **DHCP 수동 할당 추가**를 선택합니다. 접속 기기를 고르거나 MAC·IP를 직접 입력할 수 있습니다.
+
+**수정·삭제:** **DHCP 수동 할당 수정 · 삭제**에서 기존 항목을 고릅니다. IP·설명 수정과 삭제가 분리되어 있으며 삭제에는 한 번 더 확인이 필요합니다.
+
+아래 버튼을 누르면 ipTIME Tracker 통합 설정으로 이동합니다.
 """
 
 
@@ -207,7 +209,7 @@ def build_dashboard() -> dict:
                 "sections": [
                     section("결과 시각", markdown(SNAPSHOT)),
                     section("IP 임대와 수동 할당", markdown(DHCP)),
-                    section("수동 할당 추가", markdown(DHCP_ACTION), open_settings),
+                    section("수동 할당 관리", markdown(DHCP_ACTION), open_settings),
                     section("주요 설정", markdown(SETTINGS)),
                 ],
             },

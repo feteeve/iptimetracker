@@ -31,6 +31,7 @@
           "add_select": "새 기기 추가",
           "manage_select": "추적 중인 기기 편집 · 삭제",
           "dhcp_select": "DHCP 수동 할당 추가",
+          "dhcp_manage_select": "DHCP 수동 할당 수정 · 삭제",
           "settings": "재실 판정 설정"
         }
       },
@@ -43,6 +44,26 @@
         "title": "DHCP 수동 할당 추가",
         "description": "저장하면 공유기 설정이 변경됩니다. IP 중복과 LAN 대역을 검사하고 적용 결과를 다시 확인합니다. {error_detail}",
         "data": {"mac": "MAC 주소", "ip": "고정할 IP 주소", "description": "기기 설명"}
+      },
+      "dhcp_manage_select": {
+        "title": "수정·삭제할 수동 할당 선택",
+        "description": "공유기에서 현재 수동 할당 목록을 새로 읽었습니다. IP 숫자 순서로 표시합니다.",
+        "data": {"device": "수동 할당"}
+      },
+      "dhcp_manage_action": {
+        "title": "수동 할당 관리",
+        "description": "{ip} · {name} · {mac}",
+        "menu_options": {"dhcp_edit": "IP·설명 수정", "dhcp_delete_confirm": "수동 할당 삭제"}
+      },
+      "dhcp_edit": {
+        "title": "수동 할당 수정",
+        "description": "MAC {mac}의 IP나 설명을 바꿉니다. 저장 전에 충돌을 확인하고 변경 후 공유기에서 다시 읽습니다. {error_detail}",
+        "data": {"ip": "고정할 IP 주소", "description": "기기 설명"}
+      },
+      "dhcp_delete_confirm": {
+        "title": "수동 할당 삭제 확인",
+        "description": "{ip} · {name} · {mac}의 수동 할당을 삭제합니다. 이 기기의 현재 연결은 즉시 끊지 않지만, 다음 DHCP 갱신 때 IP가 달라질 수 있습니다. {error_detail}",
+        "data": {"confirm": "이 수동 할당 삭제 확인"}
       },
       "add_select": {
         "title": "추가할 기기 선택",
@@ -82,13 +103,18 @@
     "error": {
       "duplicate_nickname": "이미 다른 기기에서 사용 중인 이름입니다: {nickname}. 서로 다른 이름을 입력하세요.",
       "select_at_least_one": "추가할 기기를 하나 이상 선택하세요.",
-      "dhcp_failed": "수동 할당을 완료하지 못했습니다. 아래 오류 내용을 확인하세요."
+      "dhcp_failed": "수동 할당 변경을 완료하지 못했습니다. 아래 오류 내용을 확인하세요.",
+      "confirm_required": "삭제하려면 확인을 선택하세요."
     },
     "abort": {
       "no_addable_devices": "추가할 수 있는 새 기기가 없습니다. 공유기에 연결되어 있거나 고정 IP로 이름이 등록된 기기 중, 아직 추적하지 않는 기기가 없습니다.",
       "router_unavailable": "공유기 통합 구성요소를 사용할 수 없습니다.",
       "dhcp_unavailable": "공유기의 현재 수동 할당 목록을 확인할 수 없습니다. 잠시 후 다시 시도하세요.",
-      "dhcp_added": "공유기에 DHCP 수동 할당을 추가하고 다시 읽어 확인했습니다."
+      "dhcp_added": "공유기에 DHCP 수동 할당을 추가하고 다시 읽어 확인했습니다.",
+      "dhcp_updated": "수동 할당을 수정하고 공유기에서 다시 읽어 확인했습니다.",
+      "dhcp_deleted": "수동 할당을 삭제하고 공유기에서 다시 읽어 확인했습니다.",
+      "dhcp_empty": "수정하거나 삭제할 수동 할당이 없습니다.",
+      "dhcp_changed": "목록이 변경되었습니다. 다시 열어 선택하세요."
     }
   }
 }

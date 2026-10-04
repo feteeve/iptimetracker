@@ -31,6 +31,7 @@
           "add_select": "Add a new device",
           "manage_select": "Edit or remove tracked devices",
           "dhcp_select": "Add DHCP reservation",
+          "dhcp_manage_select": "Edit or delete DHCP reservation",
           "settings": "Settings (away detection delay)"
         }
       },
@@ -43,6 +44,26 @@
         "title": "Add DHCP reservation",
         "description": "Saving changes the router configuration. The integration checks IP conflicts and the LAN subnet, then reads back the result. {error_detail}",
         "data": {"mac": "MAC address", "ip": "Reserved IP address", "description": "Device description"}
+      },
+      "dhcp_manage_select": {
+        "title": "Choose a reservation to edit or delete",
+        "description": "The current reservation list was read from the router and is sorted by numeric IP.",
+        "data": {"device": "Reservation"}
+      },
+      "dhcp_manage_action": {
+        "title": "Manage DHCP reservation",
+        "description": "{ip} · {name} · {mac}",
+        "menu_options": {"dhcp_edit": "Edit IP and description", "dhcp_delete_confirm": "Delete reservation"}
+      },
+      "dhcp_edit": {
+        "title": "Edit DHCP reservation",
+        "description": "Change the IP or description for MAC {mac}. Conflicts are checked before saving and the result is read back. {error_detail}",
+        "data": {"ip": "Reserved IP address", "description": "Device description"}
+      },
+      "dhcp_delete_confirm": {
+        "title": "Confirm reservation deletion",
+        "description": "Delete the reservation for {ip} · {name} · {mac}. The current connection is not immediately interrupted, but the IP may change at the next DHCP renewal. {error_detail}",
+        "data": {"confirm": "Confirm deletion of this reservation"}
       },
       "add_select": {
         "title": "Choose devices to add",
@@ -84,13 +105,18 @@
     "error": {
       "duplicate_nickname": "This name is already used by another device: {nickname}. Enter a different name.",
       "select_at_least_one": "Select at least one device to add.",
-      "dhcp_failed": "Could not add the reservation. See the error details below."
+      "dhcp_failed": "Could not change the reservation. See the error details below.",
+      "confirm_required": "Select confirmation to delete this reservation."
     },
     "abort": {
       "no_addable_devices": "There are no new devices to add. There's nothing currently connected or reserved with a static IP that isn't already tracked.",
       "router_unavailable": "The router integration is unavailable.",
       "dhcp_unavailable": "The router's current reservations could not be read. Try again later.",
-      "dhcp_added": "The DHCP reservation was added and verified on the router."
+      "dhcp_added": "The DHCP reservation was added and verified on the router.",
+      "dhcp_updated": "The reservation was updated and verified on the router.",
+      "dhcp_deleted": "The reservation was deleted and verified on the router.",
+      "dhcp_empty": "There are no reservations to edit or delete.",
+      "dhcp_changed": "The list changed. Reopen it and choose a reservation again."
     }
   }
 }

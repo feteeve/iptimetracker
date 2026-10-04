@@ -363,6 +363,7 @@ class IptimeTrackerOptionsFlow(OptionsFlow):
         if tracked_count:
             menu_options.append("manage_select")
         menu_options.append("dhcp_select")
+        menu_options.append("dhcp_manage_select")
         menu_options.append("settings")
         return self.async_show_menu(
             step_id="init",
@@ -450,6 +451,118 @@ class IptimeTrackerOptionsFlow(OptionsFlow):
             ),
             errors=errors,
             description_placeholders={"error_detail": detail},
+        )
+
+    async def async_step_dhcp_manage_select(
+        self, user_input: dict[str, str] | None = None
+    ) -> ConfigFlowResult:
+        """Choose an existing reservation from a fresh router read."""
+        coordinator = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id)
+        if coordinator is None or coordinator.data is None:
+            return self.async_abort(reason="router_unavailable")
+        try:
+            rows = await coordinator.dhcp_reservations.list()
+        except (ValueError, UpdateFailed, TimeoutError):
+            return self.async_abort(reason="dhcp_unavailable")
+        if not rows:
+            return self.async_abort(reason="dhcp_empty")
+        if user_input is not None:
+            self._dhcp_selected = next(
+                (row for row in rows if row["mac"] == user_input["device"]), None
+            )
+            if self._dhcp_selected is None:
+                return self.async_abort(reason="dhcp_changed")
+            return await self.async_step_dhcp_manage_action()
+        choices = [
+            SelectOptionDict(
+                value=row["mac"],
+                label=f"{row['ip']} · {row['name'] or row['mac']} · {row['mac']}",
+            )
+            for row in rows
+        ]
+        return self.async_show_form(
+            step_id="dhcp_manage_select",
+            data_schema=vol.Schema({
+                vol.Required("device"): SelectSelector(
+                    SelectSelectorConfig(options=choices, mode=SelectSelectorMode.LIST)
+                ),
+            }),
+        )
+
+    async def async_step_dhcp_manage_action(
+        self, user_input: dict[str, str] | None = None
+    ) -> ConfigFlowResult:
+        row = self._dhcp_selected
+        return self.async_show_menu(
+            step_id="dhcp_manage_action",
+            menu_options=["dhcp_edit", "dhcp_delete_confirm"],
+            description_placeholders={
+                "ip": row["ip"], "name": row["name"] or "—", "mac": row["mac"],
+            },
+        )
+
+    async def async_step_dhcp_edit(
+        self, user_input: dict[str, str] | None = None
+    ) -> ConfigFlowResult:
+        row = self._dhcp_selected
+        errors: dict[str, str] = {}
+        detail = ""
+        if user_input is not None:
+            coordinator = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id)
+            if coordinator is None:
+                return self.async_abort(reason="router_unavailable")
+            try:
+                await coordinator.async_update_dhcp_reservation(
+                    row["mac"], user_input["ip"], user_input.get("description", ""),
+                    expected_ip=row["ip"], expected_name=row["name"],
+                )
+            except (ValueError, UpdateFailed, TimeoutError) as err:
+                errors["base"] = "dhcp_failed"
+                detail = str(err)
+            else:
+                return self.async_abort(reason="dhcp_updated")
+        ip_value = user_input["ip"] if user_input is not None else row["ip"]
+        description_value = user_input.get("description", "") if user_input is not None else row["name"]
+        return self.async_show_form(
+            step_id="dhcp_edit",
+            data_schema=vol.Schema({
+                vol.Required("ip", default=ip_value): str,
+                vol.Optional("description", default=description_value): str,
+            }),
+            errors=errors,
+            description_placeholders={"mac": row["mac"], "error_detail": detail},
+        )
+
+    async def async_step_dhcp_delete_confirm(
+        self, user_input: dict[str, bool] | None = None
+    ) -> ConfigFlowResult:
+        row = self._dhcp_selected
+        errors: dict[str, str] = {}
+        detail = ""
+        if user_input is not None:
+            if not user_input["confirm"]:
+                errors["base"] = "confirm_required"
+            else:
+                coordinator = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id)
+                if coordinator is None:
+                    return self.async_abort(reason="router_unavailable")
+                try:
+                    await coordinator.async_delete_dhcp_reservation(
+                        row["mac"], expected_ip=row["ip"], expected_name=row["name"],
+                    )
+                except (ValueError, UpdateFailed, TimeoutError) as err:
+                    errors["base"] = "dhcp_failed"
+                    detail = str(err)
+                else:
+                    return self.async_abort(reason="dhcp_deleted")
+        return self.async_show_form(
+            step_id="dhcp_delete_confirm",
+            data_schema=vol.Schema({vol.Required("confirm", default=False): bool}),
+            errors=errors,
+            description_placeholders={
+                "ip": row["ip"], "name": row["name"] or "—", "mac": row["mac"],
+                "error_detail": detail,
+            },
         )
 
     # ---- Add devices --------------------------------------------------
