@@ -22,12 +22,14 @@ APPLY_STATUS = """{% set matches = states.sensor | selectattr('name', 'eq', 'ipT
 {% endif %}
 """
 
-OVERVIEW = """### 이 화면에서 확인하는 순서
-1. **공유기 통신**과 **WAN 연결**을 먼저 확인합니다. 둘 다 현재 30초 조회 결과입니다.
-2. 문제가 있거나 자세히 보고 싶을 때 **상세 진단 수집**을 누릅니다. 수집에는 약 10초가 걸립니다.
-3. 결과 시각을 확인하고 **연결 상세**, **DHCP·설정** 탭을 봅니다.
+OVERVIEW = """1. **지금 상태**에서 공유기 통신과 인터넷 연결을 확인합니다.
+2. 문제가 있으면 **상세 진단 수집**을 누릅니다. 약 10초 뒤 결과가 갱신됩니다.
+3. **연결 상세**에서 포트와 접속 기기를, **DHCP·설정**에서 주소와 설정을 확인합니다.
+"""
 
-**속도 읽는 법:** `1 Gbps` 같은 연결 속도는 공유기 포트의 연결 규격입니다. 인터넷 속도 측정 결과가 아닙니다. 아래의 내려받음·올림 수치는 마지막 진단 약 10초 동안 실제로 사용한 양입니다. 예를 들어 `0.34 Mbps`는 약 `43 kB/s` 사용 중이었다는 뜻입니다.
+SPEED_GUIDE = """**연결 속도** · `1 Gbps`처럼 표시되는 포트 연결 규격입니다. 인터넷 회선의 최대 속도나 속도 테스트 결과는 아닙니다.
+
+**진단 당시 사용량** · 내려받음(↓)과 올림(↑)은 마지막 수집 약 10초 동안 실제 흐른 양입니다. `0.34 Mbps`는 약 `43 kB/s`입니다. 기기별 연결 속도와는 다른 값입니다.
 """
 
 PORTS = """{% set matches = states.sensor | selectattr('name', 'eq', 'ipTIME 포트 진단') | list %}
@@ -37,12 +39,12 @@ PORTS = """{% set matches = states.sensor | selectattr('name', 'eq', 'ipTIME 포
 {% elif not rows %}
 수집된 포트 정보가 없습니다. **상세 진단 수집**을 눌러 주세요.
 {% else %}
-| 포트 | 연결 속도 | 내려받음 사용량 | 올림 사용량 | 오류 증가 |
-|:--|:--|--:|--:|--:|
-{% for p in rows %}| {{ (p.type or '포트') | upper }} {{ p.port }} | {{ p.link_label or '확인 불가' }} | {{ ((p.rx_mbps | float) | round(2) | string) ~ ' Mbps' if p.rx_mbps is defined and p.rx_mbps is not none else '—' }} | {{ ((p.tx_mbps | float) | round(2) | string) ~ ' Mbps' if p.tx_mbps is defined and p.tx_mbps is not none else '—' }} | {{ ((p.rx_crc_delta | int) + (p.rx_drop_delta | int) + (p.tx_collision_delta | int)) if p.rx_crc_delta is defined and p.rx_drop_delta is defined and p.tx_collision_delta is defined else '—' }} |
+| 포트 | 연결 속도 | 당시 사용량 ↓ / ↑ | 오류 증가 |
+|:--|:--|:--|--:|
+{% for p in rows %}| {{ (p.type or '포트') | upper }} {{ p.port }} | {{ p.link_label or '확인 불가' }} | {{ ((p.rx_mbps | float) | round(2) | string) ~ ' / ' ~ ((p.tx_mbps | float) | round(2) | string) ~ ' Mbps' if p.rx_mbps is defined and p.rx_mbps is not none and p.tx_mbps is defined and p.tx_mbps is not none else '—' }} | {{ ((p.rx_crc_delta | int) + (p.rx_drop_delta | int) + (p.tx_collision_delta | int)) if p.rx_crc_delta is defined and p.rx_drop_delta is defined and p.tx_collision_delta is defined else '—' }} |
 {% endfor %}
 
-연결 속도는 포트의 연결 규격, 사용량은 마지막 진단 약 10초간 실제 흐른 양입니다. 오류 증가는 CRC·드롭·충돌의 합계입니다. `—`는 측정값이 없다는 뜻입니다.
+사용량은 마지막 진단 약 10초의 평균입니다. 오류 증가는 CRC·드롭·충돌의 합계이며, `—`는 측정값이 없다는 뜻입니다.
 {% endif %}
 """
 
@@ -176,11 +178,11 @@ def build_dashboard() -> dict:
                             tile("binary_sensor.iptime_inteones_wan_yeongyeol", "공유기 ↔ 인터넷 링크"),
                             tile("sensor.iptime_wan_ringkeu_sogdo", "WAN 포트 연결 속도"),
                             tile("sensor.iptime_ijimesi_wiseong_gigi_su", "EasyMesh 접속 기기")),
-                    section("필요할 때 수집", collect, markdown(SNAPSHOT), {**markdown(APPLY_STATUS), "show_empty": False}, markdown(OVERVIEW)),
-                    section("마지막 수집의 핵심 수치",
+                    section("상세 진단", collect, markdown(SNAPSHOT), {**markdown(APPLY_STATUS), "show_empty": False}, markdown(OVERVIEW)),
+                    section("마지막 진단 당시 WAN 사용량",
                             tile("sensor.iptime_wan_susin_teuraepig", "진단 당시 내려받음 사용량"),
                             tile("sensor.iptime_wan_songsin_teuraepig", "진단 당시 올림 사용량"),
-                            tile("sensor.iptime_jeongbo_sujib_beomwi", "지원 API 수")),
+                            markdown(SPEED_GUIDE)),
                 ],
             },
             {
@@ -188,7 +190,7 @@ def build_dashboard() -> dict:
                 "path": "connections",
                 "icon": "mdi:lan-connect",
                 "type": "sections",
-                "max_columns": 2,
+                "max_columns": 1,
                 "sections": [
                     section("결과 시각", markdown(SNAPSHOT)),
                     section("포트별 링크·트래픽·오류", markdown(PORTS)),
@@ -201,7 +203,7 @@ def build_dashboard() -> dict:
                 "path": "addresses",
                 "icon": "mdi:ip-network-outline",
                 "type": "sections",
-                "max_columns": 2,
+                "max_columns": 1,
                 "sections": [
                     section("결과 시각", markdown(SNAPSHOT)),
                     section("IP 임대와 수동 할당", markdown(DHCP)),
