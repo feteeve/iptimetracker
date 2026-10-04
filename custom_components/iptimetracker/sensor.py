@@ -17,6 +17,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .const import DOMAIN, entity_unique_id
 from .coordinator import IptimeDataUpdateCoordinator
 from .dhcp import parse_rows
+from .diagnostic_view import connected_stations, ports, selected_settings
 from .entity import GracefulAvailabilityMixin
 
 _LOGGER = logging.getLogger(__name__)
@@ -37,10 +38,79 @@ async def async_setup_entry(
             IptimeInformationCoverageSensor(coordinator, entry),
             IptimeDhcpListSensor(coordinator, entry, reservation=False),
             IptimeDhcpListSensor(coordinator, entry, reservation=True),
+            IptimeCollectedListSensor(coordinator, entry, kind="ports"),
+            IptimeCollectedListSensor(coordinator, entry, kind="stations"),
+            IptimeCollectedSettingsSensor(coordinator, entry),
             IptimeWanTrafficSensor(coordinator, entry, direction="rx"),
             IptimeWanTrafficSensor(coordinator, entry, direction="tx"),
         ]
     )
+
+
+class IptimeCollectedListSensor(CoordinatorEntity[IptimeDataUpdateCoordinator], SensorEntity):
+    """Physical ports or connected stations from the last manual snapshot."""
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_native_unit_of_measurement = "개"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(self, coordinator: IptimeDataUpdateCoordinator, entry: ConfigEntry, *, kind: str) -> None:
+        super().__init__(coordinator)
+        self._kind = kind
+        self._attr_name = "ipTIME 포트 진단" if kind == "ports" else "ipTIME 접속 기기 진단"
+        self._attr_unique_id = entity_unique_id(entry, "port_diagnostics" if kind == "ports" else "station_diagnostics")
+        self._attr_icon = "mdi:ethernet" if kind == "ports" else "mdi:devices"
+
+    @property
+    def _rows(self) -> list[dict] | None:
+        snapshot = self.coordinator.data.diagnostics
+        return ports(snapshot) if self._kind == "ports" else connected_stations(snapshot)
+
+    @property
+    def available(self) -> bool:
+        return self._rows is not None
+
+    @property
+    def native_value(self) -> int | None:
+        rows = self._rows
+        return len(rows) if rows is not None else None
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        rows = self._rows
+        if rows is None:
+            return {}
+        return {
+            "entries": rows[:50],
+            "truncated": len(rows) > 50,
+            "sample_seconds": self.coordinator.data.diagnostics.get("traffic", {}).get("sample_seconds")
+            if self._kind == "ports" and isinstance(self.coordinator.data.diagnostics.get("traffic"), dict)
+            else None,
+        }
+
+
+class IptimeCollectedSettingsSensor(CoordinatorEntity[IptimeDataUpdateCoordinator], SensorEntity):
+    """Selected LAN, DHCP and wireless settings from the manual snapshot."""
+
+    _attr_name = "ipTIME 주요 설정 진단"
+    _attr_icon = "mdi:cog-outline"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator: IptimeDataUpdateCoordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = entity_unique_id(entry, "settings_diagnostics")
+
+    @property
+    def available(self) -> bool:
+        return bool(selected_settings(self.coordinator.data.diagnostics))
+
+    @property
+    def native_value(self) -> str:
+        return "수집됨"
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        return selected_settings(self.coordinator.data.diagnostics)
 
 
 class IptimeDhcpListSensor(CoordinatorEntity[IptimeDataUpdateCoordinator], SensorEntity):
