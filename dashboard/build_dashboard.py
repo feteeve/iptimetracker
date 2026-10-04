@@ -27,7 +27,7 @@ OVERVIEW = """### 이 화면에서 확인하는 순서
 2. 문제가 있거나 자세히 보고 싶을 때 **상세 진단 수집**을 누릅니다. 수집에는 약 10초가 걸립니다.
 3. 결과 시각을 확인하고 **연결 상세**, **DHCP·설정** 탭을 봅니다.
 
-WAN 링크 속도는 포트가 협상한 속도이고, WAN 송수신 Mbps는 진단 구간에 실제 흐른 양입니다.
+**속도 읽는 법:** `1 Gbps` 같은 연결 속도는 공유기 포트의 연결 규격입니다. 인터넷 속도 측정 결과가 아닙니다. 아래의 내려받음·올림 수치는 마지막 진단 약 10초 동안 실제로 사용한 양입니다. 예를 들어 `0.34 Mbps`는 약 `43 kB/s` 사용 중이었다는 뜻입니다.
 """
 
 PORTS = """{% set matches = states.sensor | selectattr('name', 'eq', 'ipTIME 포트 진단') | list %}
@@ -37,12 +37,12 @@ PORTS = """{% set matches = states.sensor | selectattr('name', 'eq', 'ipTIME 포
 {% elif not rows %}
 수집된 포트 정보가 없습니다. **상세 진단 수집**을 눌러 주세요.
 {% else %}
-{% for p in rows %}
-**{{ (p.type or '포트') | upper }} {{ p.port }}** · 링크 {{ p.link if p.link not in [none, '', 'null'] else '끊김/미확인' }}
-{% if p.rx_mbps is defined %}↓ {{ p.rx_mbps }} Mbps · ↑ {{ p.tx_mbps }} Mbps · 새 CRC {{ p.rx_crc_delta }} · 드롭 {{ p.rx_drop_delta }} · 충돌 {{ p.tx_collision_delta }}{% else %}트래픽 측정값 없음{% endif %}
-
+| 포트 | 연결 속도 | 내려받음 사용량 | 올림 사용량 | 오류 증가 |
+|:--|:--|--:|--:|--:|
+{% for p in rows %}| {{ (p.type or '포트') | upper }} {{ p.port }} | {{ p.link_label or '확인 불가' }} | {{ ((p.rx_mbps | float) | round(2) | string) ~ ' Mbps' if p.rx_mbps is defined and p.rx_mbps is not none else '—' }} | {{ ((p.tx_mbps | float) | round(2) | string) ~ ' Mbps' if p.tx_mbps is defined and p.tx_mbps is not none else '—' }} | {{ ((p.rx_crc_delta | int) + (p.rx_drop_delta | int) + (p.tx_collision_delta | int)) if p.rx_crc_delta is defined and p.rx_drop_delta is defined and p.tx_collision_delta is defined else '—' }} |
 {% endfor %}
-측정 Mbps는 마지막 진단의 약 10초 구간 평균입니다. 링크 숫자는 포트 협상 속도입니다.
+
+연결 속도는 포트의 연결 규격, 사용량은 마지막 진단 약 10초간 실제 흐른 양입니다. 오류 증가는 CRC·드롭·충돌의 합계입니다. `—`는 측정값이 없다는 뜻입니다.
 {% endif %}
 """
 
@@ -82,7 +82,7 @@ DHCP = """{% set lease_matches = states.sensor | selectattr('name', 'eq', 'ipTIM
 {% else %}
 {% set leases = lease_matches[0].attributes.get('entries', []) %}
 {% set reserved = reserved_matches[0].attributes.get('entries', []) %}
-**수동 할당 {{ reserved_matches[0].state }}개**
+**수동 할당 {{ reserved_matches[0].state }}개 · IP 숫자 순서**
 {% if reserved %}
 | IP | 기기 | MAC |
 |:--|:--|:--|
@@ -91,7 +91,7 @@ DHCP = """{% set lease_matches = states.sensor | selectattr('name', 'eq', 'ipTIM
 {% else %}수동 할당 목록이 비어 있거나 아직 수집되지 않았습니다.
 {% endif %}
 
-**DHCP 임대 {{ lease_matches[0].state }}개**
+**DHCP 임대 {{ lease_matches[0].state }}개 · IP 숫자 순서**
 {% if leases %}
 | IP | 기기 | MAC |
 |:--|:--|:--|
@@ -174,12 +174,12 @@ def build_dashboard() -> dict:
                     section("지금 상태",
                             tile("binary_sensor.iptime_gongyugi_tongsin_sangtae", "HA ↔ 공유기 통신"),
                             tile("binary_sensor.iptime_inteones_wan_yeongyeol", "공유기 ↔ 인터넷 링크"),
-                            tile("sensor.iptime_wan_ringkeu_sogdo", "WAN 링크 속도"),
+                            tile("sensor.iptime_wan_ringkeu_sogdo", "WAN 포트 연결 속도"),
                             tile("sensor.iptime_ijimesi_wiseong_gigi_su", "EasyMesh 접속 기기")),
                     section("필요할 때 수집", collect, markdown(SNAPSHOT), {**markdown(APPLY_STATUS), "show_empty": False}, markdown(OVERVIEW)),
                     section("마지막 수집의 핵심 수치",
-                            tile("sensor.iptime_wan_susin_teuraepig", "WAN 수신 Mbps"),
-                            tile("sensor.iptime_wan_songsin_teuraepig", "WAN 송신 Mbps"),
+                            tile("sensor.iptime_wan_susin_teuraepig", "진단 당시 내려받음 사용량"),
+                            tile("sensor.iptime_wan_songsin_teuraepig", "진단 당시 올림 사용량"),
                             tile("sensor.iptime_jeongbo_sujib_beomwi", "지원 API 수")),
                 ],
             },

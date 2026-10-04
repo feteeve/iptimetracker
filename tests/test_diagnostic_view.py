@@ -19,8 +19,13 @@ class DiagnosticViewTest(unittest.TestCase):
             "traffic": {"ports": [{"type": "lan", "port": 1, "rx_mbps": 3.2, "rx_crc_delta": 1}]},
         }
         self.assertEqual(view.ports(snapshot), [{
-            "type": "lan", "port": "1", "link": "1000f", "rx_mbps": 3.2, "rx_crc_delta": 1,
+            "type": "lan", "port": "1", "link": "1000f", "link_label": "1 Gbps · 전이중", "rx_mbps": 3.2, "rx_crc_delta": 1,
         }])
+
+    def test_link_labels_explain_router_codes(self) -> None:
+        self.assertEqual(view.link_label("100h"), "100 Mbps · 반이중")
+        self.assertEqual(view.link_label(None), "끊김/미확인")
+        self.assertEqual(view.link_label("unexpected"), "확인 불가")
 
     def test_connected_stations_uses_actual_station_list(self) -> None:
         snapshot = {"raw": {"network.lan_stations": [{

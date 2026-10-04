@@ -15,6 +15,17 @@ SPEC.loader.exec_module(dhcp)
 
 
 class DhcpTest(unittest.IsolatedAsyncioTestCase):
+    def test_rows_sort_by_numeric_ip(self) -> None:
+        items = [
+            {"mac": f"AA:BB:CC:DD:EE:{n:02X}", "ip": f"192.168.0.{ip}"}
+            for n, ip in enumerate((100, 10, 2), 1)
+        ]
+        for reservation in (True, False):
+            self.assertEqual(
+                [row["ip"] for row in dhcp.parse_rows(items, reservation=reservation)],
+                ["192.168.0.2", "192.168.0.10", "192.168.0.100"],
+            )
+
     def setUp(self) -> None:
         self.calls = []
         self.reservations = []

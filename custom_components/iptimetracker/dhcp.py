@@ -38,7 +38,7 @@ def parse_rows(value: Any, *, reservation: bool) -> list[dict[str, str]] | None:
         if not reservation:
             row["expires"] = str(item.get("expires") or item.get("expire") or "")
         rows.append(row)
-    return rows
+    return sorted(rows, key=lambda row: ipaddress.IPv4Address(row["ip"]))
 
 
 class DhcpReservations:

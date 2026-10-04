@@ -3,6 +3,20 @@
 from __future__ import annotations
 
 from typing import Any
+import re
+
+
+def link_label(value: Any) -> str:
+    """Translate router link notation into a readable connection speed."""
+    if value is None or str(value).strip().lower() in {"", "null", "down", "0"}:
+        return "끊김/미확인"
+    match = re.fullmatch(r"(\d+)([fh])?", str(value).strip().lower())
+    if not match:
+        return "확인 불가"
+    speed = int(match.group(1))
+    unit = f"{speed / 1000:g} Gbps" if speed >= 1000 else f"{speed} Mbps"
+    duplex = {"f": " · 전이중", "h": " · 반이중"}.get(match.group(2), "")
+    return unit + duplex
 
 
 def ports(snapshot: dict[str, Any]) -> list[dict[str, Any]] | None:
@@ -33,6 +47,8 @@ def ports(snapshot: dict[str, Any]) -> list[dict[str, Any]] | None:
         for key in ("link", "rx_mbps", "tx_mbps", "rx_drop_delta", "rx_crc_delta", "tx_collision_delta"):
             if key in item:
                 row[key] = item[key]
+    for row in merged.values():
+        row["link_label"] = link_label(row.get("link"))
     return list(merged.values())
 
 
