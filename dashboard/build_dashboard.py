@@ -16,6 +16,12 @@ SNAPSHOT = """{% set stamp = state_attr('sensor.iptime_neteuweokeu_jindan', 'las
 {% endif %}
 """
 
+APPLY_STATUS = """{% set matches = states.sensor | selectattr('name', 'eq', 'ipTIME 포트 진단') | list %}
+{% if not matches %}
+ℹ️ 새 상세 진단 코드는 HA에 설치됐지만 아직 로드되지 않았습니다. HA 재시작 후 포트·기기·DHCP 상세가 표시됩니다.
+{% endif %}
+"""
+
 OVERVIEW = """### 이 화면에서 확인하는 순서
 1. **공유기 통신**과 **WAN 연결**을 먼저 확인합니다. 둘 다 현재 30초 조회 결과입니다.
 2. 문제가 있거나 자세히 보고 싶을 때 **상세 진단 수집**을 누릅니다. 수집에는 약 10초가 걸립니다.
@@ -27,7 +33,7 @@ WAN 링크 속도는 포트가 협상한 속도이고, WAN 송수신 Mbps는 진
 PORTS = """{% set matches = states.sensor | selectattr('name', 'eq', 'ipTIME 포트 진단') | list %}
 {% set rows = matches[0].attributes.get('entries', []) if matches else [] %}
 {% if not matches %}
-2.3.1 업데이트 후 포트 진단을 볼 수 있습니다.
+통합 업데이트와 HA 재시작 후 포트 진단을 볼 수 있습니다.
 {% elif not rows %}
 수집된 포트 정보가 없습니다. **상세 진단 수집**을 눌러 주세요.
 {% else %}
@@ -43,7 +49,7 @@ PORTS = """{% set matches = states.sensor | selectattr('name', 'eq', 'ipTIME 포
 STATIONS = """{% set matches = states.sensor | selectattr('name', 'eq', 'ipTIME 접속 기기 진단') | list %}
 {% set rows = matches[0].attributes.get('entries', []) if matches else [] %}
 {% if not matches %}
-2.3.1 업데이트 후 접속 기기 상세를 볼 수 있습니다.
+통합 업데이트와 HA 재시작 후 접속 기기 상세를 볼 수 있습니다.
 {% elif not rows %}
 수집된 접속 기기가 없습니다. **상세 진단 수집**을 눌러 주세요.
 {% else %}
@@ -72,7 +78,7 @@ MESH = """{% set agents = state_attr('sensor.iptime_ijimesi_jindan', 'agents') o
 DHCP = """{% set lease_matches = states.sensor | selectattr('name', 'eq', 'ipTIME DHCP 임대 수') | list %}
 {% set reserved_matches = states.sensor | selectattr('name', 'eq', 'ipTIME DHCP 수동 할당 수') | list %}
 {% if not lease_matches or not reserved_matches %}
-2.3.0 이상으로 업데이트하면 DHCP 목록이 표시됩니다.
+통합 업데이트와 HA 재시작 후 DHCP 목록이 표시됩니다.
 {% else %}
 {% set leases = lease_matches[0].attributes.get('entries', []) %}
 {% set reserved = reserved_matches[0].attributes.get('entries', []) %}
@@ -101,7 +107,7 @@ DHCP = """{% set lease_matches = states.sensor | selectattr('name', 'eq', 'ipTIM
 SETTINGS = """{% set matches = states.sensor | selectattr('name', 'eq', 'ipTIME 주요 설정 진단') | list %}
 {% set e = matches[0] if matches else none %}
 {% if not e %}
-2.3.1 업데이트 후 주요 설정을 볼 수 있습니다.
+통합 업데이트와 HA 재시작 후 주요 설정을 볼 수 있습니다.
 {% elif e.state in ['unavailable', 'unknown'] %}
 확인 가능한 설정값이 없습니다. **상세 진단 수집**을 눌러 주세요.
 {% else %}
@@ -170,7 +176,7 @@ def build_dashboard() -> dict:
                             tile("binary_sensor.iptime_inteones_wan_yeongyeol", "공유기 ↔ 인터넷 링크"),
                             tile("sensor.iptime_wan_ringkeu_sogdo", "WAN 링크 속도"),
                             tile("sensor.iptime_ijimesi_wiseong_gigi_su", "EasyMesh 접속 기기")),
-                    section("필요할 때 수집", collect, markdown(SNAPSHOT), markdown(OVERVIEW)),
+                    section("필요할 때 수집", collect, markdown(SNAPSHOT), {**markdown(APPLY_STATUS), "show_empty": False}, markdown(OVERVIEW)),
                     section("마지막 수집의 핵심 수치",
                             tile("sensor.iptime_wan_susin_teuraepig", "WAN 수신 Mbps"),
                             tile("sensor.iptime_wan_songsin_teuraepig", "WAN 송신 Mbps"),
