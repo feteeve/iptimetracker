@@ -1,0 +1,28 @@
+add_dhcp_reservation:
+  name: DHCP 수동 할당 추가
+  description: DHCP 임대·예약·현재 접속 기기와 LAN 대역을 확인한 뒤 수동 할당을 추가합니다.
+  fields:
+    config_entry_id:
+      name: 통합 구성 항목 ID
+      required: true
+      example: 01JABCDEFG1234567890
+      selector:
+        config_entry:
+          integration: iptimetracker
+    mac:
+      name: MAC 주소
+      required: true
+      example: AA:BB:CC:DD:EE:02
+      selector:
+        text:
+    ip:
+      name: 할당할 IPv4 주소
+      required: true
+      example: 192.168.0.52
+      selector:
+        text:
+    description:
+      name: 설명
+      example: 거실 TV
+      selector:
+        text:

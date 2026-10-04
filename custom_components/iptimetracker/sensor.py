@@ -16,6 +16,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN, entity_unique_id
 from .coordinator import IptimeDataUpdateCoordinator
+from .dhcp import parse_rows
 from .entity import GracefulAvailabilityMixin
 
 _LOGGER = logging.getLogger(__name__)
@@ -34,10 +35,49 @@ async def async_setup_entry(
             IptimeNetworkDiagnosticsSensor(coordinator, entry),
             IptimeMeshDiagnosticsSensor(coordinator, entry),
             IptimeInformationCoverageSensor(coordinator, entry),
+            IptimeDhcpListSensor(coordinator, entry, reservation=False),
+            IptimeDhcpListSensor(coordinator, entry, reservation=True),
             IptimeWanTrafficSensor(coordinator, entry, direction="rx"),
             IptimeWanTrafficSensor(coordinator, entry, direction="tx"),
         ]
     )
+
+
+class IptimeDhcpListSensor(CoordinatorEntity[IptimeDataUpdateCoordinator], SensorEntity):
+    """Count and expose the last collected DHCP rows without claiming presence."""
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator: IptimeDataUpdateCoordinator, entry: ConfigEntry, *, reservation: bool) -> None:
+        super().__init__(coordinator)
+        self._reservation = reservation
+        self._attr_name = "ipTIME DHCP 수동 할당 수" if reservation else "ipTIME DHCP 임대 수"
+        self._attr_unique_id = entity_unique_id(entry, "dhcp_reservation_count" if reservation else "dhcp_lease_count")
+        self._attr_icon = "mdi:ip-network" if reservation else "mdi:lan"
+        self._attr_native_unit_of_measurement = "개"
+        self._attr_state_class = SensorStateClass.MEASUREMENT
+
+    @property
+    def _rows(self) -> list[dict[str, str]] | None:
+        raw = self.coordinator.data.diagnostics.get("raw")
+        if not isinstance(raw, dict):
+            return None
+        key = "dhcp.reservations" if self._reservation else "dhcp.leases"
+        return parse_rows(raw.get(key), reservation=self._reservation)
+
+    @property
+    def available(self) -> bool:
+        return self._rows is not None
+
+    @property
+    def native_value(self) -> int | None:
+        rows = self._rows
+        return len(rows) if rows is not None else None
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        rows = self._rows
+        return {"entries": rows[:50], "truncated": len(rows) > 50} if rows is not None else {}
 
 
 class IptimeWanLinkSpeedSensor(
